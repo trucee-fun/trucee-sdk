@@ -20,7 +20,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
-  "dependencies": {
+  "peerDependencies": {
     "@meteora-ag/dynamic-bonding-curve-sdk": "^1.5.13",
     "@solana/spl-token": "^0.4.15",
     "@solana/web3.js": "^1.99.0",
@@ -28,8 +28,13 @@
     "buffer": "^6.0.3"
   },
   "devDependencies": {
+    "@meteora-ag/dynamic-bonding-curve-sdk": "^1.5.13",
+    "@solana/spl-token": "^0.4.15",
+    "@solana/web3.js": "^1.99.0",
     "@types/bn.js": "^5.2.0",
     "@types/node": "^26.6.4",
+    "bn.js": "^5.2.5",
+    "buffer": "^6.0.3",
     "litesvm": "^0.8.0",
     "typescript": "^5.9.3",
     "vitest": "^5.0.3"
