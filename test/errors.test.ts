@@ -88,9 +88,14 @@ describe('ROUTER_ERRORS v5 additions', () => {
     })
   })
 
-  it('6022 PositionCapExceeded and 6023 PresetNotAllowed close the table', () => {
-    expect(ROUTER_ERRORS[6022]?.name).toBe('PositionCapExceeded')
-    expect(ROUTER_ERRORS[6023]?.name).toBe('PresetNotAllowed')
+  it('6022 PositionCapExceeded and 6023 PresetNotAllowed match the ONC-04 / ONC-14 #[msg] strings', () => {
+    expect(ROUTER_ERRORS[6022]).toEqual({
+      name: 'PositionCapExceeded', message: 'Buy would exceed the anti-whale cap (20% of curve supply)',
+    })
+    expect(ROUTER_ERRORS[6023]).toEqual({
+      name: 'PresetNotAllowed',
+      message: 'Config breaks the Zero-PvP preset (creator allocation, fixed supply or unlocked LP)',
+    })
     expect(ROUTER_ERRORS[6024]).toBeUndefined()
     expect(Object.keys(ROUTER_ERRORS)).toHaveLength(24)
   })

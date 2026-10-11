@@ -48,10 +48,13 @@ export const ROUTER_ERRORS: Readonly<Record<number, { name: string; message: str
   6019: { name: 'AutoExitDeadlineInPast', message: 'Auto-exit deadline must be in the future (or 0 to clear)' },
   6020: { name: 'AutoExitNotDue', message: 'Auto-exit deadline not reached (or auto-exit not set)' },
   6021: { name: 'AutoExitCurveComplete', message: 'Curve is complete: auto-exit is no longer possible' },
-  // Frozen interface: ONC-04 and ONC-14 must append these variants with exactly these names, in this order.
-  // The messages are placeholders until their #[msg] strings land in lib.rs; update them then.
-  6022: { name: 'PositionCapExceeded', message: 'Position would exceed the per-wallet cap' },
-  6023: { name: 'PresetNotAllowed', message: 'Config is not an allowed Zero-PvP preset' },
+  // Frozen interfaces of ONC-04 (6022) and ONC-14 (6023): they append these variants to RouterError with exactly
+  // these names, in this order, and these #[msg] strings.
+  6022: { name: 'PositionCapExceeded', message: 'Buy would exceed the anti-whale cap (20% of curve supply)' },
+  6023: {
+    name: 'PresetNotAllowed',
+    message: 'Config breaks the Zero-PvP preset (creator allocation, fixed supply or unlocked LP)',
+  },
 })
 
 /** HookError in zpvp/programs/zpvp_hook/src/lib.rs. */
