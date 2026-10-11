@@ -1,0 +1,11 @@
+{
+  "address": "4uLadxCZ1fgVoyr22ed79TakjiJmbaLHj53vqTntU1E5",
+  "cluster": "devnet",
+  "slot": 509855447,
+  "owner": "D4sk6wwELD6cmd7tv6hE4hkxQP8SF8tjdegYym8iWNNb",
+  "lamports": 2042160,
+  "executable": false,
+  "space": 274,
+  "data": "277VNwDjxpqQ+X9feXb5vMIM1SJBHSJb1RIBYNYM2wRkHn8XMP712faZXZN9kxYBtKd+H8p+Gb7pQWZLC7EFkCTvdk8BeYS29aIeh7XrxmuB/GlkZ06uJoMyrz5VGReHQSIE/P3TxTcGm4hX/quBhPtof2NGGMA12sQ53BrrO1WYoPAAAAAAAQ2rGbiiQoDI+rv3k785usxpmiY2L2vnUs1y2g79MIRb51QGmaheFY07o+GVX9XmIhhuTv50wNChMNxwzNvCrEWPfwCkdDoohKVJve0i5x94nk2d40S2pWuQsNV+6gQmwYCWmAAAAAAA/0kArxQAAAAAAZD9lgIAAAAASQCvFAAAAACO/ZYCAAAAAA==",
+  "encoding": "base64"
+}
