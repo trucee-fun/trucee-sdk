@@ -1,6 +1,7 @@
 /**
  * Router events emitted with Anchor `emit!` ("Program data: <base64>" log lines).
  */
+import { Buffer } from 'buffer'
 import type { PublicKey } from '@solana/web3.js'
 import { ROUTER_PROGRAM_ID } from './constants.js'
 import type { RouterEvent } from './types.js'

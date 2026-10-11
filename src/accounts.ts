@@ -1,6 +1,7 @@
 /**
  * Decoders and fetchers for router Market and Position accounts.
  */
+import { Buffer } from 'buffer'
 import type { Connection, PublicKey } from '@solana/web3.js'
 import { ROUTER_PROGRAM_ID } from './constants.js'
 import type { MarketAccount, MarketAccounts, PositionAccount } from './types.js'
