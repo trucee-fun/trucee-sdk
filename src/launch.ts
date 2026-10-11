@@ -3,11 +3,14 @@
  *
  * Preset rules (docs/trucee-plan.md §Preset rules): no creator token allocation (no locked vesting); a static,
  * quote-collected fee (the router's read_config rejects fee schedulers, rate limiters and dynamic fees); a Token-2022
- * base whose transfer hook is zpvp_hook; DAMM v2 migration; dynamic supply and fully, permanently locked LP (the
- * router's init_market rejects anything else with PresetNotAllowed). Retention Fee / Leftover are not built, so the
- * fee claimer and the leftover receiver are plain wallets chosen by the caller, never a Trucee PDA.
+ * base whose transfer hook is zpvp_hook; DAMM v2 migration with no migration fee; dynamic supply and fully, permanently
+ * locked LP with no LP vesting (the router's init_market rejects anything else with PresetNotAllowed). Retention Fee /
+ * Leftover are not built, so the fee claimer and the leftover receiver are plain wallets chosen by the caller, never a
+ * Trucee PDA. Under dynamic supply DBC burns the leftover at migration, so the leftover receiver receives nothing; DBC
+ * still requires the account, so the parameter stays.
  */
 import { Buffer } from 'buffer'
+import BN from 'bn.js'
 import {
   Keypair,
   PACKET_DATA_SIZE,
@@ -41,6 +44,7 @@ import {
   deriveDbcPoolAddress,
   deriveDbcPoolAuthority,
   deriveDbcTokenVaultAddress,
+  getTotalSupplyFromCurve,
   validateConfigParameters,
   type BuildCurveParams,
   type ConfigParameters,
@@ -61,6 +65,10 @@ const DEFAULT_TOTAL_TOKEN_SUPPLY = 1_000_000_000n * BASE_UNIT
 const DEFAULT_PERCENTAGE_SUPPLY_ON_MIGRATION = 20
 /** All migration LP goes to the partner side and is locked forever; nothing to the creator. */
 const PARTNER_PERMANENT_LOCKED_LIQUIDITY_PERCENTAGE = 100
+/** Partner + creator permanently locked LP the router requires: all of it, which leaves none for LP vesting. */
+const ALL_LP_PERCENTAGE = 100
+/** Dynamic supply has no fixed leftover; DBC burns what is unsold at migration. */
+const NO_LEFTOVER = 0
 const MAX_PERCENTAGE = 100
 /** Metaplex-style metadata limits in UTF-8 bytes; they also keep the pool transaction within one packet. */
 const MAX_NAME_BYTES = 32
@@ -83,6 +91,7 @@ interface Preset {
   readonly migrationQuoteThreshold: bigint
   readonly feeBps: number
   readonly feeClaimer: PublicKey
+  /** DBC's leftover_receiver. Under dynamic supply DBC burns the leftover at migration, so it receives nothing. */
   readonly leftoverReceiver: PublicKey
   readonly totalTokenSupply: bigint
   readonly percentageSupplyOnMigration: number
@@ -245,9 +254,60 @@ function curveParams(preset: Preset): BuildCurveParams {
   }
 }
 
-/** The router's init_market rejects a fixed supply (fixed_token_supply_flag 1) with PresetNotAllowed (6023). */
-function assertDynamicSupply(tokenSupply: ConfigParameters['tokenSupply']): void {
-  if (tokenSupply !== null) throw new RangeError('the Zero-PvP preset must use dynamic supply (tokenSupply null), got a fixed supply')
+type Numeric = { toString(): string } | number | null | undefined
+
+/** A missing value is not zero, so a field the builder left out fails the check (fail closed). */
+const isZero = (value: Numeric): boolean => value !== null && value !== undefined && value.toString() === '0'
+const allZero = (values: readonly Numeric[]): boolean => values.every(isZero)
+
+type LiquidityVestingInfo = ConfigParameters['partnerLiquidityVestingInfo']
+
+const lpVestingFields = (info: LiquidityVestingInfo | undefined): readonly Numeric[] =>
+  [info?.vestingPercentage, info?.bpsPerPeriod, info?.numberOfPeriods, info?.cliffDurationFromMigrationTime, info?.frequency]
+
+/**
+ * [rule, holds] for every rule of the preset: the ones the router's init_market enforces with PresetNotAllowed (6023)
+ * on the config bytes (ONC-14: supply, locked vesting, LP split; ONC-08/ONC-20: migration option and fees, immutable
+ * token authority) and its read_config static-fee rule.
+ */
+function presetRules(p: ConfigParameters): readonly (readonly [rule: string, holds: boolean])[] {
+  const vesting = p.lockedVesting
+  const baseFee = p.poolFees?.baseFee
+  const permanentlyLockedLp = p.partnerPermanentLockedLiquidityPercentage + p.creatorPermanentLockedLiquidityPercentage
+  return [
+    ['dynamic supply (tokenSupply null)', p.tokenSupply === null],
+    ['no locked vesting (creator allocation)', allZero([
+      vesting?.amountPerPeriod, vesting?.cliffDurationFromMigrationTime, vesting?.frequency, vesting?.numberOfPeriod, vesting?.cliffUnlockAmount,
+    ])],
+    ['no unlocked partner LP', isZero(p.partnerLiquidityPercentage)],
+    ['no unlocked creator LP', isZero(p.creatorLiquidityPercentage)],
+    [`permanently locked LP summing to ${ALL_LP_PERCENTAGE}`, permanentlyLockedLp === ALL_LP_PERCENTAGE],
+    ['no partner LP vesting', allZero(lpVestingFields(p.partnerLiquidityVestingInfo))],
+    ['no creator LP vesting', allZero(lpVestingFields(p.creatorLiquidityVestingInfo))],
+    ['no migration fee', allZero([p.migrationFee?.feePercentage, p.migrationFee?.creatorFeePercentage])],
+    ['DAMM v2 migration', p.migrationOption === MigrationOption.MET_DAMM_V2],
+    // A mint authority for the creator or partner (options 3, 4) would let them mint and dump after graduation.
+    ['an immutable base mint (tokenUpdateAuthority Immutable)', p.tokenUpdateAuthority === TokenAuthorityOption.Immutable],
+    ['a static quote-collected fee', baseFee?.baseFeeMode === BaseFeeMode.FeeSchedulerLinear &&
+      allZero([baseFee.firstFactor, baseFee.secondFactor, baseFee.thirdFactor]) &&
+      p.poolFees.dynamicFee === null && p.collectFeeMode === CollectFeeMode.QuoteToken],
+  ]
+}
+
+/** Throws, naming every broken rule, unless `params` keeps the whole preset; init_market would reject it on chain. */
+function assertPreset(params: ConfigParameters): void {
+  const broken = presetRules(params).filter(([, holds]) => !holds).map(([rule]) => rule)
+  if (broken.length > 0) throw new RangeError(`the config breaks the Zero-PvP preset; it needs ${broken.join(', ')}`)
+}
+
+/** What DBC mints for a dynamic-supply pool: the curve's swap amount with its buffer plus the migration amount. */
+function curveSupply(params: ConfigParameters): BN {
+  try {
+    return getTotalSupplyFromCurve(params.migrationQuoteThreshold, params.sqrtStartPrice, params.curve, params.lockedVesting,
+      params.migrationOption, new BN(NO_LEFTOVER), params.migrationFee.feePercentage)
+  } catch (error) {
+    throw new RangeError(`totalTokenSupply: could not compute the supply of the DBC curve: ${errorMessage(error)}`, { cause: error })
+  }
 }
 
 function zeroPvpConfigParameters(preset: Preset): ConfigParameters {
@@ -260,19 +320,22 @@ function zeroPvpConfigParameters(preset: Preset): ConfigParameters {
     padding: [0, 0],
   }
   assertExact(params.migrationQuoteThreshold, preset.migrationQuoteThreshold, 'migrationQuoteThreshold')
-  assertDynamicSupply(params.tokenSupply)
+  assertPreset(params)
   validateConfigParameters({ ...params, leftoverReceiver: preset.leftoverReceiver }, { isTransferHook: true })
+  // With tokenSupply null DBC skips its own supply check, so check here that the curve mints exactly the asked supply.
+  assertExact(curveSupply(params), preset.totalTokenSupply, 'totalTokenSupply')
   return params
 }
 
 /**
  * DBC ConfigParameters for a transfer-hook pool the router accepts: static cliff fee of `feeBps * 1e5` / 1e9
  * collected in quote, no scheduler periods, no dynamic fee, Token-2022 base (6 decimals), DAMM v2 migration with no
- * migration fee, partner LP 100% permanently locked, no locked vesting, dynamic supply (`tokenSupply` null; DBC burns
- * the leftover at migration). `totalTokenSupply` (raw base units) and `percentageSupplyOnMigration` shape the curve so
- * that the supply DBC mints for the pool (swap amount with buffer + migration amount) is `totalTokenSupply`. Defaults:
- * 1_000_000_000 tokens, 20% of supply on migration. Throws when `migrationQuoteThreshold` exceeds
- * `quote.maxMigrationQuoteThreshold`.
+ * migration fee, partner LP 100% permanently locked with no LP vesting, no locked vesting, dynamic supply
+ * (`tokenSupply` null; DBC burns the leftover at migration, so `leftoverReceiver` receives nothing). `totalTokenSupply`
+ * (raw base units) and `percentageSupplyOnMigration` shape the curve so that the supply DBC mints for the pool (swap
+ * amount with buffer + migration amount) is `totalTokenSupply`. Defaults: 1_000_000_000 tokens, 20% of supply on
+ * migration. Throws when `migrationQuoteThreshold` exceeds `quote.maxMigrationQuoteThreshold`, when the curve cannot
+ * mint exactly `totalTokenSupply`, or when the built config breaks any preset rule (fails closed).
  */
 export function buildZeroPvpConfigParameters(opts: PresetOptions): ConfigParameters {
   return zeroPvpConfigParameters(requirePreset(opts))

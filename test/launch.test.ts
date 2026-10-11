@@ -36,6 +36,9 @@ import { CONFIG_MIGRATION_QUOTE_THRESHOLD_OFFSET, isCurveComplete, readU64, setu
 const PACKET_DATA_SIZE = 1232
 const BASE_DECIMALS = 6
 const ONE_BILLION_TOKENS = 1_000_000_000n * 10n ** BigInt(BASE_DECIMALS)
+/** u64 max rounded down to whole tokens. */
+const MAX_WHOLE_TOKEN_SUPPLY = ((2n ** 64n - 1n) / 10n ** BigInt(BASE_DECIMALS)) * 10n ** BigInt(BASE_DECIMALS)
+const NO_LP_VESTING = { vestingPercentage: 0, bpsPerPeriod: 0, numberOfPeriods: 0, cliffDurationFromMigrationTime: 0, frequency: 0 }
 const FEE_BPS = 100
 const CREATOR_LAMPORTS = 10_000_000_000n // 10 SOL
 const INITIAL_BUY = 2_000_000n // 0.002 SOL: far below the Anti-Whale cap (20% of swap_base_amount)
@@ -119,8 +122,8 @@ describe('buildZeroPvpConfigParameters', () => {
       creatorLiquidityPercentage: 0, creatorPermanentLockedLiquidityPercentage: 0, creatorTradingFeePercentage: 0,
       migrationFee: { feePercentage: 0, creatorFeePercentage: 0 }, tokenSupply: null, padding: [0, 0],
     })
-    expect(params.partnerLiquidityVestingInfo?.vestingPercentage ?? 0).toBe(0)
-    expect(params.creatorLiquidityVestingInfo?.vestingPercentage ?? 0).toBe(0)
+    expect(params.partnerLiquidityVestingInfo).toEqual(NO_LP_VESTING)
+    expect(params.creatorLiquidityVestingInfo).toEqual(NO_LP_VESTING)
     expect(params.poolCreationFee.toString()).toBe('0')
     const vesting = params.lockedVesting
     ;[vesting.amountPerPeriod, vesting.cliffDurationFromMigrationTime, vesting.frequency, vesting.numberOfPeriod, vesting.cliffUnlockAmount]
@@ -150,6 +153,14 @@ describe('buildZeroPvpConfigParameters', () => {
 
     expect(params.tokenSupply).toBeNull()
     expect(dynamicSupply.toString()).toBe(minted.toString())
+  })
+
+  it('throws when the DBC curve cannot mint exactly totalTokenSupply', () => {
+    // The largest whole-token u64 supply against a 1-lamport threshold: buildCurve's curve mints 14808703024890812770.
+    const preset = presetOf({ migrationQuoteThreshold: 1n, totalTokenSupply: MAX_WHOLE_TOKEN_SUPPLY })
+
+    expect(() => buildZeroPvpConfigParameters(preset))
+      .toThrow(new RegExp(`totalTokenSupply ${MAX_WHOLE_TOKEN_SUPPLY} is not representable by the DBC curve builder \\(got \\d+\\)`))
   })
 
   it('accepts a threshold equal to the quote cap and throws one lamport above it', () => {
