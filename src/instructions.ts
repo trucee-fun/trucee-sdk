@@ -13,6 +13,7 @@ import {
 import {
   NATIVE_MINT,
   TOKEN_2022_PROGRAM_ID,
+  TOKEN_PROGRAM_ID,
   createApproveCheckedInstruction,
   createAssociatedTokenAccountIdempotentInstruction,
   createCloseAccountInstruction,
@@ -61,6 +62,8 @@ const MARKET_ACCOUNT_FIELDS = Object.freeze([
   'market', 'pool', 'config', 'baseMint', 'quoteMint', 'baseVault', 'quoteVault', 'bufferVault', 'quoteTokenProgram',
 ] as const)
 const CLUSTER_PROGRAM_FIELDS = Object.freeze(['routerProgramId', 'hookProgramId', 'dbcProgramId'] as const)
+/** The only token programs a quote mint can live under. */
+const QUOTE_TOKEN_PROGRAMS: readonly string[] = Object.freeze([TOKEN_PROGRAM_ID.toBase58(), TOKEN_2022_PROGRAM_ID.toBase58()])
 
 /* ---------- input validation ---------- */
 
@@ -129,7 +132,9 @@ const readonlyMeta = (pubkey: PublicKey): AccountMeta => ({ pubkey, isSigner: fa
 const writableMeta = (pubkey: PublicKey): AccountMeta => ({ pubkey, isSigner: false, isWritable: true })
 const signerMeta = (pubkey: PublicKey, isWritable: boolean): AccountMeta => ({ pubkey, isSigner: true, isWritable })
 
-const isNativeQuote = (accounts: MarketAccounts): boolean => accounts.quoteMint.toBase58() === NATIVE_MINT.toBase58()
+/** wSOL: NATIVE_MINT under SPL Token. NATIVE_MINT under Token-2022 is not SOL, so it is never wrapped or unwrapped. */
+const isNativeQuote = (accounts: MarketAccounts): boolean =>
+  accounts.quoteMint.toBase58() === NATIVE_MINT.toBase58() && accounts.quoteTokenProgram.toBase58() === TOKEN_PROGRAM_ID.toBase58()
 const quoteAtaOf = (accounts: MarketAccounts, owner: PublicKey): PublicKey =>
   getAssociatedTokenAddressSync(accounts.quoteMint, owner, false, accounts.quoteTokenProgram)
 const baseAtaOf = (accounts: MarketAccounts, owner: PublicKey): PublicKey =>
@@ -141,10 +146,20 @@ interface SwapContext {
   readonly user: PublicKey
 }
 
+function requireQuoteTokenProgram(accounts: MarketAccounts): MarketAccounts {
+  const program = accounts.quoteTokenProgram.toBase58()
+  if (!QUOTE_TOKEN_PROGRAMS.includes(program)) {
+    throw new TypeError(`accounts.quoteTokenProgram must be the SPL Token or Token-2022 program, got ${program}`)
+  }
+  return accounts
+}
+
 function requireSwapContext(p: unknown, builder: string): SwapContext {
   requireObject(p, `${builder} params`)
   const params = p as BuyParams | SellParams
-  return { cluster: requireCluster(params.cluster), accounts: requireMarketAccounts(params.accounts), user: requireKey(params.user, 'user') }
+  const cluster = requireCluster(params.cluster)
+  const accounts = requireQuoteTokenProgram(requireMarketAccounts(params.accounts))
+  return { cluster, accounts, user: requireKey(params.user, 'user') }
 }
 
 /**
@@ -211,15 +226,23 @@ export function buyInstructions(p: BuyParams): TransactionInstruction[] {
   return [...createAtas, ...wrapSol, routerSwapInstruction(context, encodeData(DISCRIMINATORS.buy, [amountIn, minOut]))]
 }
 
-/** Exit at cost through the router; appends the wSOL unwrap (close the quote ATA) when `unwrapSol` is set. */
+/**
+ * Exit at cost through the router: idempotently creates the user's quote ATA (the refund lands there, and an earlier
+ * unwrap may have closed it), calls the router `sell`, then closes that ATA to unwrap the refund to SOL when
+ * `unwrapSol` is set and the quote is native.
+ */
 export function sellInstructions(p: SellParams): TransactionInstruction[] {
   const context = requireSwapContext(p, 'sellInstructions')
   const tokens = requireU64(p.tokens, 'tokens', 1n)
   if (typeof p.unwrapSol !== 'boolean') throw new TypeError(`unwrapSol must be a boolean, got ${typeof p.unwrapSol}`)
-  const sell = routerSwapInstruction(context, encodeData(DISCRIMINATORS.sell, [tokens]))
   const { accounts, user } = context
-  if (!p.unwrapSol || !isNativeQuote(accounts)) return [sell]
-  return [sell, createCloseAccountInstruction(quoteAtaOf(accounts, user), user, user, [], accounts.quoteTokenProgram)]
+  const quoteAta = quoteAtaOf(accounts, user)
+  const createQuoteAta = createAssociatedTokenAccountIdempotentInstruction(user, quoteAta, user, accounts.quoteMint, accounts.quoteTokenProgram)
+  const sell = routerSwapInstruction(context, encodeData(DISCRIMINATORS.sell, [tokens]))
+  const unwrapSol = p.unwrapSol && isNativeQuote(accounts)
+    ? [createCloseAccountInstruction(quoteAta, user, user, [], accounts.quoteTokenProgram)]
+    : []
+  return [createQuoteAta, sell, ...unwrapSol]
 }
 
 /** Permissionless once the curve is complete: snapshots the buffer surplus and the open basis. */
@@ -334,7 +357,7 @@ export function setAutoExitInstructions(p: SetAutoExitParams): TransactionInstru
 export function autoExitInstruction(p: AutoExitParams): TransactionInstruction {
   requireObject(p, 'autoExitInstruction params')
   const cluster = requireCluster(p.cluster)
-  const accounts = requireMarketAccounts(p.accounts)
+  const accounts = requireQuoteTokenProgram(requireMarketAccounts(p.accounts))
   const cranker = requireKey(p.cranker, 'cranker')
   const owner = requireKey(p.owner, 'owner')
   const keys = [

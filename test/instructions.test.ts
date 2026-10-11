@@ -96,7 +96,7 @@ describe('instruction data', () => {
   })
 
   it('sell = sha256("global:sell")[..8] | tokens u64', () => {
-    const [sell] = sellInstructions({ cluster, accounts, user, tokens: 1_234_567n, unwrapSol: false })
+    const [, sell] = sellInstructions({ cluster, accounts, user, tokens: 1_234_567n, unwrapSol: false })
     expect(dataOf(sell!)).toBe(Buffer.concat([anchorDiscriminator('sell'), u64le(1_234_567n)]).toString('hex'))
   })
 
@@ -136,20 +136,21 @@ describe('account orders', () => {
     expect(keysOf(ixs[2]!)).toEqual(expectedSwapKeys(accounts, user))
   })
 
-  it('sellInstructions: router sell, plus closeAccount of the wSOL ATA only when unwrapping a native quote', () => {
+  it('sellInstructions: idempotent quote ATA, router sell, plus closeAccount of the wSOL ATA only when unwrapping a native quote', () => {
     const native = marketAccounts(NATIVE_MINT, TOKEN_PROGRAM_ID)
     const quoteAta = getAssociatedTokenAddressSync(NATIVE_MINT, user, false, TOKEN_PROGRAM_ID)
     const kept = sellInstructions({ cluster, accounts: native, user, tokens: 10n, unwrapSol: false })
-    expect(kept).toHaveLength(1)
-    expect(keysOf(kept[0]!)).toEqual(expectedSwapKeys(native, user))
+    expect(kept).toHaveLength(2)
+    expect(kept[0]).toEqual(createAssociatedTokenAccountIdempotentInstruction(user, quoteAta, user, NATIVE_MINT, TOKEN_PROGRAM_ID))
+    expect(keysOf(kept[1]!)).toEqual(expectedSwapKeys(native, user))
 
     const unwrapped = sellInstructions({ cluster, accounts: native, user, tokens: 10n, unwrapSol: true })
-    expect(unwrapped).toHaveLength(2)
-    expect(unwrapped[0]).toEqual(kept[0])
-    expect(unwrapped[1]).toEqual(createCloseAccountInstruction(quoteAta, user, user, [], TOKEN_PROGRAM_ID))
+    expect(unwrapped).toHaveLength(3)
+    expect(unwrapped.slice(0, 2)).toEqual(kept)
+    expect(unwrapped[2]).toEqual(createCloseAccountInstruction(quoteAta, user, user, [], TOKEN_PROGRAM_ID))
 
     const token = marketAccounts(Keypair.generate().publicKey, TOKEN_2022_PROGRAM_ID)
-    expect(sellInstructions({ cluster, accounts: token, user, tokens: 10n, unwrapSol: true })).toHaveLength(1)
+    expect(sellInstructions({ cluster, accounts: token, user, tokens: 10n, unwrapSol: true })).toHaveLength(2)
   })
 
   it('finalizeInstruction: market (w), pool, buffer', () => {
