@@ -310,20 +310,23 @@ describe('fetchMarket', () => {
 })
 
 describe('fetchAllMarkets', () => {
-  const marketFilter = { memcmp: { offset: 0, bytes: Buffer.from(MARKET_DISC).toString('base64'), encoding: 'base64' } }
+  const marketFilters = [
+    { memcmp: { offset: 0, bytes: Buffer.from(MARKET_DISC).toString('base64'), encoding: 'base64' } },
+    { dataSize: MARKET_ACCOUNT_SIZE },
+  ]
 
-  it('queries the router with only the Market discriminator filter', async () => {
+  it('queries the router with the Market discriminator and current Market size filters', async () => {
     const { connection, getProgramAccounts } = mockConnection({
       getProgramAccounts: async () => [
         { pubkey: DEVNET_MARKET_ADDRESS, account: accountInfo(devnetMarketData()) },
-        { pubkey: key(42), account: accountInfo(buildMarket(SAMPLE_MARKET, MARKET_ACCOUNT_SIZE + 8)) },
+        { pubkey: key(42), account: accountInfo(buildMarket(SAMPLE_MARKET)) },
       ],
     })
 
     const markets = await fetchAllMarkets(connection)
 
     expect(getProgramAccounts).toHaveBeenCalledTimes(1)
-    expect(getProgramAccounts).toHaveBeenCalledWith(ROUTER_PROGRAM_ID, { filters: [marketFilter] })
+    expect(getProgramAccounts).toHaveBeenCalledWith(ROUTER_PROGRAM_ID, { filters: marketFilters })
     expect(markets.map((m) => m.address.toBase58())).toEqual([DEVNET_MARKET.address, key(42).toBase58()])
     expect(markets[1]?.feeNumerator).toBe(25_000_000n)
   })
@@ -333,16 +336,16 @@ describe('fetchAllMarkets', () => {
     const { connection, getProgramAccounts } = mockConnection({ getProgramAccounts: async () => [] })
 
     await expect(fetchAllMarkets(connection, programId)).resolves.toEqual([])
-    expect(getProgramAccounts).toHaveBeenCalledWith(programId, { filters: [marketFilter] })
+    expect(getProgramAccounts).toHaveBeenCalledWith(programId, { filters: marketFilters })
   })
 })
 
 describe('fetchPositionsByOwner', () => {
-  it('queries the router with the Position discriminator and owner filters', async () => {
+  it('queries the router with the Position discriminator, owner and current Position size filters', async () => {
     const owner = SAMPLE_POSITION.owner
     const { connection, getProgramAccounts } = mockConnection({
       getProgramAccounts: async () => [
-        { pubkey: key(43), account: accountInfo(buildPosition(SAMPLE_POSITION)) },
+        { pubkey: key(43), account: accountInfo(buildPosition({ ...SAMPLE_POSITION, autoExitDeadline: 0n })) },
         { pubkey: key(44), account: accountInfo(buildPosition({ ...SAMPLE_POSITION, autoExitDeadline: 5n })) },
       ],
     })
@@ -354,10 +357,11 @@ describe('fetchPositionsByOwner', () => {
       filters: [
         { memcmp: { offset: 0, bytes: Buffer.from(POSITION_DISC).toString('base64'), encoding: 'base64' } },
         { memcmp: { offset: 8, bytes: owner.toBase58() } },
+        { dataSize: POSITION_ACCOUNT_SIZE_V2 },
       ],
     })
     expect(positions.map((p) => [p.address.toBase58(), p.autoExitDeadline])).toEqual([
-      [key(43).toBase58(), null],
+      [key(43).toBase58(), 0n],
       [key(44).toBase58(), 5n],
     ])
   })

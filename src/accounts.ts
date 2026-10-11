@@ -1,7 +1,9 @@
 /**
  * Decoders and fetchers for router Market and Position accounts.
  * Layouts mirror zpvp/programs/zpvp_router/src/lib.rs (little-endian borsh, 8-byte Anchor discriminator).
- * Later program versions may append fields, so decoders accept longer data and fetchers never filter on dataSize.
+ * Decoders accept longer data (later program versions may append fields) and 89-byte legacy Positions.
+ * Program-account scans also filter on the current layout size, so legacy-size accounts the devnet router still owns
+ * (241-byte Markets, 89-byte pre-v5 Positions) are skipped instead of failing the whole scan.
  */
 import { Buffer } from 'buffer'
 import { PublicKey, type Connection, type GetProgramAccountsFilter } from '@solana/web3.js'
@@ -157,12 +159,14 @@ const memcmp = (offset: number, bytes: readonly number[]): GetProgramAccountsFil
   memcmp: { offset, bytes: Buffer.from(bytes).toString('base64'), encoding: 'base64' },
 })
 
+const dataSize = (size: number): GetProgramAccountsFilter => ({ dataSize: size })
+
 export async function fetchAllMarkets(
   connection: Connection,
   routerProgramId: PublicKey = ROUTER_PROGRAM_ID,
 ): Promise<MarketAccount[]> {
   const accounts = await connection.getProgramAccounts(routerProgramId, {
-    filters: [memcmp(0, MARKET_DISCRIMINATOR)],
+    filters: [memcmp(0, MARKET_DISCRIMINATOR), dataSize(MARKET_ACCOUNT_SIZE)],
   })
   return accounts.map(({ pubkey, account }) => decodeMarket(pubkey, account.data))
 }
@@ -176,6 +180,7 @@ export async function fetchPositionsByOwner(
     filters: [
       memcmp(0, POSITION_DISCRIMINATOR),
       { memcmp: { offset: POSITION_OFFSETS.owner, bytes: owner.toBase58() } },
+      dataSize(POSITION_ACCOUNT_SIZE_V2),
     ],
   })
   return accounts.map(({ pubkey, account }) => decodePosition(pubkey, account.data))
