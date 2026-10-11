@@ -108,6 +108,12 @@ const resumeKeys = (plan: LaunchPlan): Pick<LaunchParams, 'configKeypair' | 'bas
   baseMintKeypair: plan.signers[1]?.[0],
 })
 
+/** Unused keypairs that still take the resume path (both keys present). */
+const freshResumeKeys = (): Pick<LaunchParams, 'configKeypair' | 'baseMintKeypair'> => ({
+  configKeypair: Keypair.generate(),
+  baseMintKeypair: Keypair.generate(),
+})
+
 const signerKeys = (plan: LaunchPlan): string[][] => plan.signers.map((keys) => keys.map((k) => k.publicKey.toBase58()))
 const programsOf = (plan: LaunchPlan): string[][] => plan.transactions.map((tx) => tx.instructions.map((ix) => ix.programId.toBase58()))
 const dataOf = (ix: TransactionInstruction): string => ix.data.toString('base64')
@@ -121,11 +127,12 @@ describe('buildLaunchPlan resume (offline)', () => {
     expect(connection.requests).toEqual([])
   })
 
-  it('reuses the given keypairs and fetches config, pool, extra metas and market in one request', async () => {
+  it('reuses the given keypairs and fetches config, pool, extra metas, market and creator position in one request', async () => {
     const connection = offlineConnection()
     const configKeypair = Keypair.generate()
     const baseMintKeypair = Keypair.generate()
-    const plan = await buildLaunchPlan(launchParams({ connection, configKeypair, baseMintKeypair }))
+    const creator = Keypair.generate().publicKey
+    const plan = await buildLaunchPlan(launchParams({ connection, creator, configKeypair, baseMintKeypair }))
 
     expect(plan.config.toBase58()).toBe(configKeypair.publicKey.toBase58())
     expect(plan.baseMint.toBase58()).toBe(baseMintKeypair.publicKey.toBase58())
@@ -136,13 +143,14 @@ describe('buildLaunchPlan resume (offline)', () => {
       plan.pool.toBase58(),
       findExtraAccountMetasPda(plan.baseMint, localnet.hookProgramId).toBase58(),
       plan.market.toBase58(),
+      findPositionPda(plan.market, creator, localnet.routerProgramId).toBase58(),
     ]])
   })
 
   it('treats a lamports-only system account at the market PDA as missing', async () => {
     const prefunded: AccountInfo<Buffer> = { executable: false, owner: SystemProgram.programId, lamports: 1_000_000, data: Buffer.alloc(0) }
     const connection = offlineConnection((keys) => keys.map((_, i) => (i === 3 ? prefunded : null)))
-    const plan = await buildLaunchPlan(launchParams({ connection, configKeypair: Keypair.generate(), baseMintKeypair: Keypair.generate() }))
+    const plan = await buildLaunchPlan(launchParams({ connection, ...freshResumeKeys() }))
 
     expect(programsOf(plan)[2]).toEqual([localnet.hookProgramId.toBase58(), localnet.routerProgramId.toBase58()])
   })
@@ -151,7 +159,7 @@ describe('buildLaunchPlan resume (offline)', () => {
     const foreign: AccountInfo<Buffer> = { executable: false, owner: Keypair.generate().publicKey, lamports: 1_000_000, data: Buffer.alloc(8) }
     const connection = offlineConnection((keys) => keys.map((_, i) => (i === 2 ? foreign : null)))
 
-    await expect(buildLaunchPlan(launchParams({ connection, configKeypair: Keypair.generate(), baseMintKeypair: Keypair.generate() })))
+    await expect(buildLaunchPlan(launchParams({ connection, ...freshResumeKeys() })))
       .rejects.toThrow(/hook extra-account-metas \w+ is owned by/)
   })
 
@@ -160,6 +168,13 @@ describe('buildLaunchPlan resume (offline)', () => {
     ['a baseMintKeypair that is not a Keypair', { baseMintKeypair: 'mint' as unknown as Keypair }, /baseMintKeypair/],
   ])('rejects %s', async (_label, overrides, message) => {
     await expect(buildLaunchPlan(launchParams(overrides as Partial<LaunchParams>))).rejects.toThrow(message)
+  })
+
+  it.each([
+    ['only configKeypair', { configKeypair: Keypair.generate() }],
+    ['only baseMintKeypair', { baseMintKeypair: Keypair.generate() }],
+  ])('rejects a half resume with %s', async (_label, overrides) => {
+    await expect(buildLaunchPlan(launchParams(overrides))).rejects.toThrow(/configKeypair and baseMintKeypair must be passed together/)
   })
 
   it('rejects the same keypair for the config and the base mint', async () => {
@@ -171,13 +186,13 @@ describe('buildLaunchPlan resume (offline)', () => {
     const connection = offlineConnection(() => {
       throw new Error('rpc down')
     })
-    await expect(buildLaunchPlan(launchParams({ connection, configKeypair: Keypair.generate() })))
+    await expect(buildLaunchPlan(launchParams({ connection, ...freshResumeKeys() })))
       .rejects.toThrow(/could not fetch the launch accounts.*rpc down/)
   })
 
   it('rejects an account response of the wrong length', async () => {
     const connection = offlineConnection(() => [null])
-    await expect(buildLaunchPlan(launchParams({ connection, configKeypair: Keypair.generate() }))).rejects.toThrow(/expected 4 accounts/)
+    await expect(buildLaunchPlan(launchParams({ connection, ...freshResumeKeys() }))).rejects.toThrow(/expected 5 accounts/)
   })
 })
 
@@ -283,6 +298,24 @@ describe('buildLaunchPlan resume on LiteSVM (wSOL, capped router)', () => {
     expect(rebuilt.market.toBase58()).toBe(first.market.toBase58())
   })
 
+  it('returns no transactions, so no second buy, when a full launch with an initial buy is rebuilt', async () => {
+    const creator = fund()
+    const params = launchParams({ connection: svmConnection(svm), creator: creator.publicKey, initialBuy: INITIAL_BUY })
+    const first = await buildLaunchPlan(params)
+    execute(first, creator)
+    const positionAddress = findPositionPda(first.market, creator.publicKey, localnet.routerProgramId)
+    const before = decodePosition(positionAddress, accountData(positionAddress))
+
+    const rebuilt = await buildLaunchPlan({ ...params, ...resumeKeys(first) })
+    execute(rebuilt, creator)
+
+    expect(rebuilt.transactions).toEqual([])
+    expect(rebuilt.signers).toEqual([])
+    const after = decodePosition(positionAddress, accountData(positionAddress))
+    expect([after.tokens, after.basis]).toEqual([before.tokens, before.basis])
+    expect(decodeMarket(first.market, accountData(first.market)).totalBasis).toBe(before.basis)
+  })
+
   it('keeps the pool and market transactions, with the base-mint signer, when only the config exists', async () => {
     const creator = fund()
     const params = launchParams({ connection: svmConnection(svm), creator: creator.publicKey })
@@ -305,6 +338,16 @@ describe('buildLaunchPlan resume on LiteSVM (wSOL, capped router)', () => {
 
     await expect(buildLaunchPlan({ ...params, ...resumeKeys(first), preset: { ...params.preset, feeClaimer: Keypair.generate().publicKey } }))
       .rejects.toThrow(/existing config \w+ has fee claimer/)
+  })
+
+  it('throws when the existing config has another fee', async () => {
+    const creator = fund()
+    const params = launchParams({ connection: svmConnection(svm), creator: creator.publicKey })
+    const first = await buildLaunchPlan(params)
+    expect(sendPlanTx(first, 0, creator)).toBeNull()
+
+    await expect(buildLaunchPlan({ ...params, ...resumeKeys(first), preset: { ...params.preset, feeBps: FEE_BPS * 2 } }))
+      .rejects.toThrow(/existing config \w+ has base fee numerator 10000000, expected 20000000/)
   })
 
   it('throws when an existing pool belongs to another config', async () => {
