@@ -2,13 +2,15 @@
  * Decoders and fetchers for router Market and Position accounts.
  * Layouts mirror zpvp/programs/zpvp_router/src/lib.rs (little-endian borsh, 8-byte Anchor discriminator).
  * Decoders accept longer data (later program versions may append fields) and 89-byte legacy Positions.
- * Program-account scans also filter on the current layout size, so legacy-size accounts the devnet router still owns
+ * Program-account scans also filter on the supported layout sizes, so legacy-size accounts the devnet router still owns
  * (241-byte Markets, 89-byte pre-v5 Positions) are skipped instead of failing the whole scan.
+ * Markets come in two supported sizes: 274 bytes (router v5) and 300 bytes (router v6, Retention fields appended).
  */
 import { Buffer } from 'buffer'
 import { PublicKey, type Connection, type GetProgramAccountsFilter } from '@solana/web3.js'
 import {
   MARKET_ACCOUNT_SIZE,
+  MARKET_ACCOUNT_SIZE_V6,
   POSITION_ACCOUNT_SIZE_V1,
   POSITION_ACCOUNT_SIZE_V2,
   ROUTER_PROGRAM_ID,
@@ -22,6 +24,9 @@ const PUBKEY_SIZE = 32
 const MARKET_DISCRIMINATOR: readonly number[] = Object.freeze([219, 190, 213, 55, 0, 227, 198, 154])
 /** sha256("account:Position")[..8] */
 const POSITION_DISCRIMINATOR: readonly number[] = Object.freeze([170, 188, 143, 228, 122, 64, 247, 208])
+
+/** Market sizes fetchAllMarkets lists, one scan each: v5 (274 bytes) and v6 (300 bytes). Never the 241-byte legacy one. */
+const MARKET_SCAN_SIZES: readonly number[] = Object.freeze([MARKET_ACCOUNT_SIZE, MARKET_ACCOUNT_SIZE_V6])
 
 const MARKET_OFFSETS = Object.freeze({
   pool: 8,
@@ -161,14 +166,30 @@ const memcmp = (offset: number, bytes: readonly number[]): GetProgramAccountsFil
 
 const dataSize = (size: number): GetProgramAccountsFilter => ({ dataSize: size })
 
+/** Keeps the first account seen at each address, in scan order. */
+const uniqueByAddress = <T extends { readonly pubkey: PublicKey }>(accounts: readonly T[]): T[] => {
+  const seen = new Set<string>()
+  return accounts.filter(({ pubkey }) => {
+    const address = pubkey.toBase58()
+    if (seen.has(address)) return false
+    seen.add(address)
+    return true
+  })
+}
+
+/** Lists v5 and v6 Markets: one filtered scan per Market size, merged by address (v5 scan first). */
 export async function fetchAllMarkets(
   connection: Connection,
   routerProgramId: PublicKey = ROUTER_PROGRAM_ID,
 ): Promise<MarketAccount[]> {
-  const accounts = await connection.getProgramAccounts(routerProgramId, {
-    filters: [memcmp(0, MARKET_DISCRIMINATOR), dataSize(MARKET_ACCOUNT_SIZE)],
-  })
-  return accounts.map(({ pubkey, account }) => decodeMarket(pubkey, account.data))
+  const scans = await Promise.all(
+    MARKET_SCAN_SIZES.map((size) =>
+      connection.getProgramAccounts(routerProgramId, {
+        filters: [memcmp(0, MARKET_DISCRIMINATOR), dataSize(size)],
+      }),
+    ),
+  )
+  return uniqueByAddress(scans.flat()).map(({ pubkey, account }) => decodeMarket(pubkey, account.data))
 }
 
 export async function fetchPositionsByOwner(

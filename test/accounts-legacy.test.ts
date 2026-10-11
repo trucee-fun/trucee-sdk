@@ -2,6 +2,8 @@
  * SDK-24: router program-account scans skip legacy-size accounts.
  * The devnet router still owns 241-byte Markets and 89-byte pre-v5 Positions. A scan that filtered on the
  * discriminator alone handed them to the strict decoders, and one legacy Market failed the whole call.
+ * SDK-26: router v6 (ONC-15) allocates 300-byte Markets, so the Market scan lists both 274-byte (v5) and
+ * 300-byte (v6) Markets, whichever router version the cluster runs.
  * The mocked RPC below applies memcmp and dataSize filters the way a real RPC node does.
  */
 import { Buffer } from 'buffer'
@@ -16,15 +18,19 @@ import { describe, expect, it, vi } from 'vitest'
 import { decodeMarket, decodePosition, fetchAllMarkets, fetchPositionsByOwner } from '../src/accounts.js'
 import {
   MARKET_ACCOUNT_SIZE,
+  MARKET_ACCOUNT_SIZE_V6,
   POSITION_ACCOUNT_SIZE_V1,
   POSITION_ACCOUNT_SIZE_V2,
   ROUTER_PROGRAM_ID,
 } from '../src/constants.js'
+import type { MarketAccount } from '../src/types.js'
 
 const MARKET_DISC = [219, 190, 213, 55, 0, 227, 198, 154]
 const POSITION_DISC = [170, 188, 143, 228, 122, 64, 247, 208]
 /** Market before total_basis and the snapshots: discriminator | 7 pubkeys | fee u64 | bump u8. */
 const LEGACY_MARKET_SIZE = 241
+/** Router v6 Retention fields appended to the v5 Market: basis_bought_total u64 | retention u8 | fees_settled u8 | 2 x u64. */
+const V6_RETENTION_FIELDS_SIZE = 8 + 1 + 1 + 8 + 8
 const POSITION_OWNER_OFFSET = 8
 const AUTO_EXIT_DEADLINE = 1_791_763_200n
 
@@ -37,6 +43,27 @@ const buildMarket = (size: number): Buffer => {
   const data = Buffer.alloc(size)
   Buffer.from(MARKET_DISC).copy(data, 0)
   for (let i = 0; i < 7; i += 1) key(i + 1).toBuffer().copy(data, 8 + 32 * i)
+  if (size >= MARKET_ACCOUNT_SIZE) {
+    data.writeBigUInt64LE(25_000_000n, 232)
+    data.writeUInt8(253, 240)
+    data.writeBigUInt64LE(7_000n, 241)
+    data.writeUInt8(1, 249)
+    data.writeBigUInt64LE(11n, 250)
+    data.writeBigUInt64LE(22n, 258)
+    data.writeBigUInt64LE(33n, 266)
+  }
+  return data
+}
+
+/** A v6 Market: the v5 bytes of buildMarket, then non-zero Retention fields at offsets 274/282/283/284/292. */
+const buildV6Market = (): Buffer => {
+  const data = Buffer.alloc(MARKET_ACCOUNT_SIZE_V6)
+  buildMarket(MARKET_ACCOUNT_SIZE).copy(data, 0)
+  data.writeBigUInt64LE(9_000n, 274)
+  data.writeUInt8(1, 282)
+  data.writeUInt8(1, 283)
+  data.writeBigUInt64LE(44n, 284)
+  data.writeBigUInt64LE(55n, 292)
   return data
 }
 
@@ -62,16 +89,18 @@ const programAccount = (pubkey: PublicKey, data: Buffer): ProgramAccount => ({
   account: { data, executable: false, lamports: 1_000_000, owner: ROUTER_PROGRAM_ID, rentEpoch: 0 },
 })
 
-const CURRENT_MARKET = programAccount(key(100), buildMarket(MARKET_ACCOUNT_SIZE))
+const V5_MARKET = programAccount(key(100), buildMarket(MARKET_ACCOUNT_SIZE))
 const LEGACY_MARKET = programAccount(key(101), buildMarket(LEGACY_MARKET_SIZE))
+const V6_MARKET = programAccount(key(105), buildV6Market())
 const CURRENT_POSITION = programAccount(key(102), buildPosition(OWNER, POSITION_ACCOUNT_SIZE_V2))
 const LEGACY_POSITION = programAccount(key(103), buildPosition(OWNER, POSITION_ACCOUNT_SIZE_V1))
 const OTHER_OWNER_POSITION = programAccount(key(104), buildPosition(OTHER_OWNER, POSITION_ACCOUNT_SIZE_V2))
 
-/** What the devnet router owns: one of each layout, legacy accounts listed first. */
+/** What a router owns across versions: one of each layout, legacy accounts listed first. */
 const ROUTER_ACCOUNTS: readonly ProgramAccount[] = Object.freeze([
   LEGACY_MARKET,
-  CURRENT_MARKET,
+  V5_MARKET,
+  V6_MARKET,
   LEGACY_POSITION,
   CURRENT_POSITION,
   OTHER_OWNER_POSITION,
@@ -105,8 +134,17 @@ const mockRpc = (accounts: readonly ProgramAccount[]) => {
   return { connection, getProgramAccounts, served }
 }
 
-const filtersSent = (fn: ReturnType<typeof mockRpc>['getProgramAccounts']): readonly GetProgramAccountsFilter[] =>
-  fn.mock.calls[0]?.[1]?.filters ?? []
+const filtersSent = (
+  fn: ReturnType<typeof mockRpc>['getProgramAccounts'],
+  call: number = 0,
+): readonly GetProgramAccountsFilter[] => fn.mock.calls[call]?.[1]?.filters ?? []
+
+const marketDiscriminatorFilter: GetProgramAccountsFilter = {
+  memcmp: { offset: 0, bytes: Buffer.from(MARKET_DISC).toString('base64'), encoding: 'base64' },
+}
+
+/** Every field but the address, so Markets at different addresses compare by content. */
+const marketFields = ({ address: _address, ...fields }: MarketAccount): Omit<MarketAccount, 'address'> => fields
 
 const base58s = (keys: readonly PublicKey[]): string[] => keys.map((k) => k.toBase58())
 
@@ -119,31 +157,69 @@ describe('legacy fixtures', () => {
 
     const markets = await connection.getProgramAccounts(ROUTER_PROGRAM_ID, { filters: [discriminatorOnly] })
 
-    expect(base58s(markets.map(({ pubkey }) => pubkey))).toEqual(base58s([LEGACY_MARKET.pubkey, CURRENT_MARKET.pubkey]))
+    expect(base58s(markets.map(({ pubkey }) => pubkey))).toEqual(
+      base58s([LEGACY_MARKET.pubkey, V5_MARKET.pubkey, V6_MARKET.pubkey]),
+    )
     expect(() => decodeMarket(LEGACY_MARKET.pubkey, LEGACY_MARKET.account.data)).toThrow(/241 bytes/)
   })
 })
 
+describe('market account sizes', () => {
+  it('MARKET_ACCOUNT_SIZE_V6 is the v5 Market plus the 26-byte Retention fields', () => {
+    expect(MARKET_ACCOUNT_SIZE).toBe(274)
+    expect(MARKET_ACCOUNT_SIZE_V6).toBe(300)
+    expect(MARKET_ACCOUNT_SIZE_V6).toBe(MARKET_ACCOUNT_SIZE + V6_RETENTION_FIELDS_SIZE)
+  })
+})
+
 describe('fetchAllMarkets with legacy accounts', () => {
-  it('sends the Market discriminator and the current Market size as filters', async () => {
+  it('runs one scan per Market size, each with the Market discriminator', async () => {
     const { connection, getProgramAccounts } = mockRpc(ROUTER_ACCOUNTS)
 
     await fetchAllMarkets(connection)
 
-    expect(getProgramAccounts).toHaveBeenCalledTimes(1)
-    expect(filtersSent(getProgramAccounts)).toEqual([
-      { memcmp: { offset: 0, bytes: Buffer.from(MARKET_DISC).toString('base64'), encoding: 'base64' } },
-      { dataSize: MARKET_ACCOUNT_SIZE },
-    ])
+    expect(getProgramAccounts).toHaveBeenCalledTimes(2)
+    expect(filtersSent(getProgramAccounts, 0)).toEqual([marketDiscriminatorFilter, { dataSize: MARKET_ACCOUNT_SIZE }])
+    expect(filtersSent(getProgramAccounts, 1)).toEqual([marketDiscriminatorFilter, { dataSize: MARKET_ACCOUNT_SIZE_V6 }])
   })
 
-  it('returns only current-layout Markets and is never served the 241-byte Market', async () => {
+  it('returns v5 and v6 Markets and is never served the 241-byte Market', async () => {
     const { connection, served } = mockRpc(ROUTER_ACCOUNTS)
 
     const markets = await fetchAllMarkets(connection)
 
-    expect(base58s(markets.map((m) => m.address))).toEqual(base58s([CURRENT_MARKET.pubkey]))
+    expect(base58s(markets.map((m) => m.address))).toEqual(base58s([V5_MARKET.pubkey, V6_MARKET.pubkey]))
     expect(base58s(served)).not.toContain(LEGACY_MARKET.pubkey.toBase58())
+  })
+
+  it('lists the Markets of a v6-only router', async () => {
+    const { connection } = mockRpc([LEGACY_MARKET, V6_MARKET])
+
+    const markets = await fetchAllMarkets(connection)
+
+    expect(base58s(markets.map((m) => m.address))).toEqual(base58s([V6_MARKET.pubkey]))
+  })
+
+  it('merges the scans by address, so an account served by both is listed once', async () => {
+    const getProgramAccounts = vi.fn<GetProgramAccountsFn>(async () => [V5_MARKET, V6_MARKET])
+    const connection = { getProgramAccounts } as unknown as Connection
+
+    const markets = await fetchAllMarkets(connection)
+
+    expect(getProgramAccounts).toHaveBeenCalledTimes(2)
+    expect(base58s(markets.map((m) => m.address))).toEqual(base58s([V5_MARKET.pubkey, V6_MARKET.pubkey]))
+  })
+})
+
+describe('decodeMarket on a v6 Market', () => {
+  it('decodes the 300-byte layout and ignores the 26 Retention bytes', () => {
+    const v6 = decodeMarket(V6_MARKET.pubkey, V6_MARKET.account.data)
+    const v5 = decodeMarket(V5_MARKET.pubkey, V5_MARKET.account.data)
+
+    expect(v6.address.equals(V6_MARKET.pubkey)).toBe(true)
+    expect(marketFields(v6)).toEqual(marketFields(v5))
+    expect(Object.keys(v6).sort()).toEqual(Object.keys(v5).sort())
+    expect(v6.surplusClaimed).toBe(33n)
   })
 })
 

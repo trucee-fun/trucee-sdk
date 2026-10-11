@@ -18,6 +18,7 @@ import {
 } from '../src/accounts.js'
 import {
   MARKET_ACCOUNT_SIZE,
+  MARKET_ACCOUNT_SIZE_V6,
   POSITION_ACCOUNT_SIZE_V1,
   POSITION_ACCOUNT_SIZE_V2,
   ROUTER_PROGRAM_ID,
@@ -310,12 +311,13 @@ describe('fetchMarket', () => {
 })
 
 describe('fetchAllMarkets', () => {
-  const marketFilters = [
-    { memcmp: { offset: 0, bytes: Buffer.from(MARKET_DISC).toString('base64'), encoding: 'base64' } },
-    { dataSize: MARKET_ACCOUNT_SIZE },
-  ]
+  const discriminatorFilter = {
+    memcmp: { offset: 0, bytes: Buffer.from(MARKET_DISC).toString('base64'), encoding: 'base64' },
+  }
+  const marketFilters = [discriminatorFilter, { dataSize: MARKET_ACCOUNT_SIZE }]
+  const v6MarketFilters = [discriminatorFilter, { dataSize: MARKET_ACCOUNT_SIZE_V6 }]
 
-  it('queries the router with the Market discriminator and current Market size filters', async () => {
+  it('queries the router with the Market discriminator and each Market size filter', async () => {
     const { connection, getProgramAccounts } = mockConnection({
       getProgramAccounts: async () => [
         { pubkey: DEVNET_MARKET_ADDRESS, account: accountInfo(devnetMarketData()) },
@@ -325,8 +327,9 @@ describe('fetchAllMarkets', () => {
 
     const markets = await fetchAllMarkets(connection)
 
-    expect(getProgramAccounts).toHaveBeenCalledTimes(1)
+    expect(getProgramAccounts).toHaveBeenCalledTimes(2)
     expect(getProgramAccounts).toHaveBeenCalledWith(ROUTER_PROGRAM_ID, { filters: marketFilters })
+    expect(getProgramAccounts).toHaveBeenCalledWith(ROUTER_PROGRAM_ID, { filters: v6MarketFilters })
     expect(markets.map((m) => m.address.toBase58())).toEqual([DEVNET_MARKET.address, key(42).toBase58()])
     expect(markets[1]?.feeNumerator).toBe(25_000_000n)
   })
@@ -337,6 +340,7 @@ describe('fetchAllMarkets', () => {
 
     await expect(fetchAllMarkets(connection, programId)).resolves.toEqual([])
     expect(getProgramAccounts).toHaveBeenCalledWith(programId, { filters: marketFilters })
+    expect(getProgramAccounts).toHaveBeenCalledWith(programId, { filters: v6MarketFilters })
   })
 })
 

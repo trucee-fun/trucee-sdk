@@ -18,6 +18,11 @@ export const HAIRCUT_PER_EXIT = 2n
 
 /** Market: discriminator 8 | 7 pubkeys | fee u64 | bump u8 | total_basis u64 | finalized u8 | 3 x u64. */
 export const MARKET_ACCOUNT_SIZE = 274
+/**
+ * Router v6 Market (ONC-15): the v5 layout plus basis_bought_total u64 | retention u8 | fees_settled u8 |
+ * fees_claimed u64 | creator_paid u64, appended at offsets 274/282/283/284/292.
+ */
+export const MARKET_ACCOUNT_SIZE_V6 = 300
 /** Position without auto-exit: discriminator 8 | owner | market | tokens u64 | basis u64 | bump u8. */
 export const POSITION_ACCOUNT_SIZE_V1 = 89
 /** Position with the trailing auto_exit_deadline i64. */
