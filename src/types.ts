@@ -206,6 +206,10 @@ export interface LaunchParams {
   readonly uri: string
   readonly preset: PresetOptions
   readonly initialBuy?: bigint
+  /** Resume: the first plan's config keypair (its `signers[0][0]`); a fresh one is generated when absent. */
+  readonly configKeypair?: Keypair
+  /** Resume: the first plan's base-mint keypair (its `signers[1][0]`); a fresh one is generated when absent. */
+  readonly baseMintKeypair?: Keypair
 }
 
 /** Transactions to launch a token; `signers[i]` are the extra signers of `transactions[i]`. */

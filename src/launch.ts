@@ -11,9 +11,12 @@ import {
   Keypair,
   PACKET_DATA_SIZE,
   PublicKey,
+  SystemProgram,
   Transaction,
+  type AccountInfo,
   type AccountMeta,
   type BlockhashWithExpiryBlockHeight,
+  type Commitment,
   type Connection,
   type TransactionInstruction,
 } from '@solana/web3.js'
@@ -39,9 +42,13 @@ import {
   validateConfigParameters,
   type BuildCurveParams,
   type ConfigParameters,
+  type ConfigWithTransferHook,
+  type DynamicCurveProgram,
+  type TransferHookPool,
 } from '@meteora-ag/dynamic-bonding-curve-sdk'
+import { decodeMarket } from './accounts.js'
 import { buyInstructions, initExtraAccountMetasInstruction, initMarketInstruction } from './instructions.js'
-import { findBufferPda, findMarketPda } from './pda.js'
+import { findBufferPda, findExtraAccountMetasPda, findMarketPda } from './pda.js'
 import type { ClusterConfig, LaunchParams, LaunchPlan, MarketAccounts, PresetOptions, QuoteMintInfo } from './types.js'
 
 /** Base token decimals of every Zero-PvP launch (mirrors litesvm-diff/src/fixture.ts). */
@@ -60,9 +67,13 @@ const MAX_URI_BYTES = 200
 /** The initial buy shares the transaction that opens the market, so it is the pool's first possible trade. */
 const INITIAL_BUY_MIN_OUT = 0n
 
+/** A resume reads at 'confirmed' so a retry right after a failed transaction sees the accounts that just landed. */
+const LAUNCH_ACCOUNTS_COMMITMENT: Commitment = 'confirmed'
+
 const U8_MAX = 255
 const U64_MAX = 2n ** 64n - 1n
 const PUBLIC_KEY_LENGTH = 32
+const SECRET_KEY_LENGTH = 64
 
 /** Validated PresetOptions with defaults applied. */
 interface Preset {
@@ -96,6 +107,22 @@ function requireWallet(value: unknown, name: string): PublicKey {
   const key = requireKey(value, name)
   if (!PublicKey.isOnCurve(key.toBytes())) throw new RangeError(`${name} must be a wallet address, got the off-curve (PDA) ${key.toBase58()}`)
   return key
+}
+
+const errorMessage = (error: unknown): string => (error instanceof Error ? error.message : String(error))
+
+/** Optional; duck-typed like requireKey and rebuilt from the secret key, which checks it against its public half. */
+function requireOptionalKeypair(value: unknown, name: string): Keypair | undefined {
+  if (value === undefined) return undefined
+  const secretKey = (value as { secretKey?: unknown } | null)?.secretKey
+  if (!(secretKey instanceof Uint8Array) || secretKey.length !== SECRET_KEY_LENGTH) {
+    throw new TypeError(`${name} must be a Keypair with a ${SECRET_KEY_LENGTH}-byte secret key`)
+  }
+  try {
+    return Keypair.fromSecretKey(secretKey)
+  } catch (error) {
+    throw new TypeError(`${name} must be a valid Keypair: ${errorMessage(error)}`, { cause: error })
+  }
 }
 
 function requireU64(value: unknown, name: string, min: bigint): bigint {
@@ -246,6 +273,9 @@ interface LaunchInputs {
   readonly uri: string
   readonly preset: Preset
   readonly initialBuy: bigint
+  /** Set only when resuming an earlier plan. */
+  readonly configKeypair: Keypair | undefined
+  readonly baseMintKeypair: Keypair | undefined
 }
 
 /** The DBC instructions come from the DBC SDK's IDL, so the cluster must name that same DBC program. */
@@ -278,6 +308,11 @@ function requireLaunchParams(p: unknown): LaunchInputs {
   const cluster = requireCluster(params.cluster)
   requireObject(params.preset, 'preset')
   const quote = requireClusterQuote(cluster, requireQuote(params.preset.quote))
+  const configKeypair = requireOptionalKeypair(params.configKeypair, 'configKeypair')
+  const baseMintKeypair = requireOptionalKeypair(params.baseMintKeypair, 'baseMintKeypair')
+  if (configKeypair !== undefined && baseMintKeypair?.publicKey.equals(configKeypair.publicKey) === true) {
+    throw new RangeError('configKeypair and baseMintKeypair must be different keys')
+  }
   return {
     connection: params.connection,
     cluster,
@@ -287,16 +322,22 @@ function requireLaunchParams(p: unknown): LaunchInputs {
     uri: requireText(params.uri, 'uri', 0, MAX_URI_BYTES),
     preset: requirePreset({ ...params.preset, quote }),
     initialBuy: params.initialBuy === undefined ? 0n : requireU64(params.initialBuy, 'initialBuy', 0n),
+    configKeypair,
+    baseMintKeypair,
   }
 }
 
-async function recentBlockhash(connection: Connection): Promise<BlockhashWithExpiryBlockHeight> {
+/** Runs one RPC call, naming `what` it fetched when it fails. */
+async function fetchOrThrow<T>(what: string, call: () => Promise<T>): Promise<T> {
   try {
-    return await connection.getLatestBlockhash()
+    return await call()
   } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error)
-    throw new Error(`buildLaunchPlan: could not fetch a recent blockhash: ${reason}`, { cause: error })
+    throw new Error(`buildLaunchPlan: could not fetch ${what}: ${errorMessage(error)}`, { cause: error })
   }
+}
+
+function recentBlockhash(connection: Connection): Promise<BlockhashWithExpiryBlockHeight> {
+  return fetchOrThrow('a recent blockhash', () => connection.getLatestBlockhash())
 }
 
 /** Fee payer = creator; throws when the transaction cannot fit one packet with every signature present. */
@@ -327,8 +368,119 @@ function launchAccounts(inputs: LaunchInputs, config: PublicKey, baseMint: Publi
   }
 }
 
-async function dbcInstructions(inputs: LaunchInputs, a: LaunchAccounts): Promise<[TransactionInstruction, TransactionInstruction]> {
-  const { program } = createDbcProgram(inputs.connection)
+/* ---------- resume: accounts that already exist ---------- */
+
+/** Which launch accounts already exist on chain; a first build with fresh keypairs has none. */
+interface ExistingAccounts {
+  readonly config: boolean
+  readonly pool: boolean
+  readonly extraMetas: boolean
+  readonly market: boolean
+}
+
+const NONE_EXIST: ExistingAccounts = Object.freeze({ config: false, pool: false, extraMetas: false, market: false })
+
+type MaybeAccount = AccountInfo<Buffer> | null
+
+/** [field, on-chain value, value this launch expects], both as display strings. */
+type Expectation = readonly [field: string, actual: string, expected: string]
+
+const keyText = (key: { toBase58(): string }): string => key.toBase58()
+
+async function fetchLaunchAccounts(connection: Connection, addresses: readonly PublicKey[]): Promise<readonly MaybeAccount[]> {
+  const infos: unknown = await fetchOrThrow('the launch accounts',
+    () => connection.getMultipleAccountsInfo([...addresses], LAUNCH_ACCOUNTS_COMMITMENT))
+  if (!Array.isArray(infos) || infos.length !== addresses.length) {
+    const got = Array.isArray(infos) ? `${infos.length}` : typeof infos
+    throw new Error(`buildLaunchPlan: expected ${addresses.length} accounts from getMultipleAccountsInfo, got ${got}`)
+  }
+  return infos as readonly MaybeAccount[]
+}
+
+/**
+ * The account when `owner` holds it; null when it is missing or only holds lamports (a system account with no data,
+ * which Anchor's init still accepts). Any other owner means the address is taken by something else.
+ */
+function ownedAccount(info: MaybeAccount | undefined, owner: PublicKey, label: string, address: PublicKey): MaybeAccount {
+  if (info === undefined || info === null) return null
+  const holder = keyText(info.owner)
+  if (holder === SystemProgram.programId.toBase58() && info.data.length === 0) return null
+  if (holder !== owner.toBase58()) {
+    throw new Error(`buildLaunchPlan: ${label} ${address.toBase58()} is owned by ${holder}, not ${owner.toBase58()}`)
+  }
+  return info
+}
+
+function assertMatches(label: string, address: PublicKey, expectations: readonly Expectation[]): void {
+  const mismatch = expectations.find(([, actual, expected]) => actual !== expected)
+  if (mismatch === undefined) return
+  const [field, actual, expected] = mismatch
+  throw new Error(
+    `buildLaunchPlan: existing ${label} ${address.toBase58()} has ${field} ${actual}, expected ${expected}; it does not belong to this launch`,
+  )
+}
+
+function decodeDbc<T>(program: DynamicCurveProgram, name: 'configWithTransferHook' | 'transferHookPool', label: string, address: PublicKey, data: Buffer): T {
+  try {
+    return program.coder.accounts.decode<T>(name, data)
+  } catch (error) {
+    throw new Error(`buildLaunchPlan: existing ${label} ${address.toBase58()} is not a DBC transfer-hook ${label}: ${errorMessage(error)}`, { cause: error })
+  }
+}
+
+/** The existing config must carry this launch's quote, wallets, threshold and hook. */
+function checkConfig(inputs: LaunchInputs, program: DynamicCurveProgram, a: LaunchAccounts, data: Buffer): void {
+  const { config, transferHookProgram } = decodeDbc<ConfigWithTransferHook>(program, 'configWithTransferHook', 'config', a.config, data)
+  const { preset, cluster } = inputs
+  assertMatches('config', a.config, [
+    ['quote mint', keyText(config.quoteMint), keyText(a.quoteMint)],
+    ['fee claimer', keyText(config.feeClaimer), keyText(preset.feeClaimer)],
+    ['leftover receiver', keyText(config.leftoverReceiver), keyText(preset.leftoverReceiver)],
+    ['migration quote threshold', config.migrationQuoteThreshold.toString(), preset.migrationQuoteThreshold.toString()],
+    ['transfer hook program', keyText(transferHookProgram), keyText(cluster.hookProgramId)],
+  ])
+}
+
+function checkPool(inputs: LaunchInputs, program: DynamicCurveProgram, a: LaunchAccounts, data: Buffer): void {
+  const { poolState } = decodeDbc<TransferHookPool>(program, 'transferHookPool', 'pool', a.pool, data)
+  assertMatches('pool', a.pool, [
+    ['config', keyText(poolState.config), keyText(a.config)],
+    ['base mint', keyText(poolState.baseMint), keyText(a.baseMint)],
+    ['creator', keyText(poolState.creator), keyText(inputs.creator)],
+  ])
+}
+
+function checkMarket(a: LaunchAccounts, data: Buffer): void {
+  const market = decodeMarket(a.market, data)
+  assertMatches('market', a.market, [
+    ['pool', keyText(market.pool), keyText(a.pool)],
+    ['config', keyText(market.config), keyText(a.config)],
+    ['base mint', keyText(market.baseMint), keyText(a.baseMint)],
+  ])
+}
+
+/** One getMultipleAccountsInfo over [config, pool, extra metas, market]; throws on an account of another launch. */
+async function existingAccounts(inputs: LaunchInputs, program: DynamicCurveProgram, a: LaunchAccounts): Promise<ExistingAccounts> {
+  const { cluster } = inputs
+  const extraMetas = findExtraAccountMetasPda(a.baseMint, cluster.hookProgramId)
+  const infos = await fetchLaunchAccounts(inputs.connection, [a.config, a.pool, extraMetas, a.market])
+  const config = ownedAccount(infos[0], cluster.dbcProgramId, 'config', a.config)
+  const pool = ownedAccount(infos[1], cluster.dbcProgramId, 'pool', a.pool)
+  const metas = ownedAccount(infos[2], cluster.hookProgramId, 'hook extra-account-metas', extraMetas)
+  const market = ownedAccount(infos[3], cluster.routerProgramId, 'market', a.market)
+  if (config !== null) checkConfig(inputs, program, a, config.data)
+  if (pool !== null) checkPool(inputs, program, a, pool.data)
+  if (market !== null) checkMarket(a, market.data)
+  return Object.freeze({ config: config !== null, pool: pool !== null, extraMetas: metas !== null, market: market !== null })
+}
+
+/* ---------- plan assembly ---------- */
+
+async function dbcInstructions(
+  inputs: LaunchInputs,
+  program: DynamicCurveProgram,
+  a: LaunchAccounts,
+): Promise<[TransactionInstruction, TransactionInstruction]> {
   const { cluster, creator, preset } = inputs
   const eventAuthority = deriveDbcEventAuthority()
   const createConfig = program.methods.createConfigWithTransferHook(zeroPvpConfigParameters(preset))
@@ -349,17 +501,24 @@ async function dbcInstructions(inputs: LaunchInputs, a: LaunchAccounts): Promise
   return Promise.all([createConfig, createPool])
 }
 
-/** Hook extra-account-metas, router market and (when initialBuy > 0) the creator's buy, in one transaction. */
-function openMarketInstructions(inputs: LaunchInputs, a: LaunchAccounts): TransactionInstruction[] {
+/** Hook extra-account-metas and router market inits that are still missing, then the creator's buy when initialBuy > 0. */
+function openMarketInstructions(inputs: LaunchInputs, a: LaunchAccounts, existing: ExistingAccounts): TransactionInstruction[] {
   const { cluster, creator, initialBuy } = inputs
+  const hookInit = existing.extraMetas ? [] : [initExtraAccountMetasInstruction(creator, a.baseMint, cluster.hookProgramId)]
+  const marketInit = existing.market
+    ? []
+    : [initMarketInstruction({ cluster, payer: creator, pool: a.pool, config: a.config, quoteMint: a.quoteMint, quoteTokenProgram: a.quoteTokenProgram })]
   const buy = initialBuy > 0n
     ? buyInstructions({ cluster, accounts: a, user: creator, amountIn: initialBuy, minOut: INITIAL_BUY_MIN_OUT })
     : []
-  return [
-    initExtraAccountMetasInstruction(creator, a.baseMint, cluster.hookProgramId),
-    initMarketInstruction({ cluster, payer: creator, pool: a.pool, config: a.config, quoteMint: a.quoteMint, quoteTokenProgram: a.quoteTokenProgram }),
-    ...buy,
-  ]
+  return [...hookInit, ...marketInit, ...buy]
+}
+
+/** One launch transaction before it is built: its instructions and the extra signers it needs. */
+interface LaunchStep {
+  readonly label: string
+  readonly instructions: readonly TransactionInstruction[]
+  readonly signers: readonly Keypair[]
 }
 
 /**
@@ -369,22 +528,35 @@ function openMarketInstructions(inputs: LaunchInputs, a: LaunchAccounts): Transa
  * has fee payer = creator and a recent blockhash, and fits one packet. The preset quote must be allowed by the
  * cluster, whose QuoteMintInfo (cap, programs, badge) is authoritative. Throws on invalid input, including a uri
  * above 200 bytes or a threshold above the quote cap.
+ *
+ * Resume: pass the first plan's config keypair (its signers[0][0]) as `configKeypair` and its base-mint keypair
+ * (signers[1][0]) as `baseMintKeypair`. The plan then fetches the config, pool, extra-metas and market in one
+ * getMultipleAccountsInfo call and leaves out what already exists (the hook init and init_market are permissionless,
+ * so a third party may have sent them). After a full launch it holds just the buy, or no transaction when
+ * `initialBuy` is 0. `signers[i]` stays aligned with the transactions that remain. Throws when an existing account belongs to another launch: a config with another quote,
+ * wallets, threshold or hook, a pool with another config, base mint or creator, or a market with another pool,
+ * config or base mint. A first build with fresh keypairs makes no account request, since nothing can exist yet.
  */
 export async function buildLaunchPlan(p: LaunchParams): Promise<LaunchPlan> {
   const inputs = requireLaunchParams(p)
-  const configKeypair = Keypair.generate()
-  const baseMintKeypair = Keypair.generate()
+  const configKeypair = inputs.configKeypair ?? Keypair.generate()
+  const baseMintKeypair = inputs.baseMintKeypair ?? Keypair.generate()
   const accounts = launchAccounts(inputs, configKeypair.publicKey, baseMintKeypair.publicKey)
-  const [createConfig, createPool] = await dbcInstructions(inputs, accounts)
+  const { program } = createDbcProgram(inputs.connection)
+  const isResume = inputs.configKeypair !== undefined || inputs.baseMintKeypair !== undefined
+  const existing = isResume ? await existingAccounts(inputs, program, accounts) : NONE_EXIST
+  const [createConfig, createPool] = await dbcInstructions(inputs, program, accounts)
+  const openMarket = openMarketInstructions(inputs, accounts, existing)
+  const steps: readonly LaunchStep[] = [
+    ...(existing.config ? [] : [{ label: 'create config', instructions: [createConfig], signers: [configKeypair] }]),
+    ...(existing.pool ? [] : [{ label: 'create pool', instructions: [createPool], signers: [baseMintKeypair] }]),
+    ...(openMarket.length === 0 ? [] : [{ label: 'open market', instructions: openMarket, signers: [] }]),
+  ]
   const blockhash = await recentBlockhash(inputs.connection)
   const { creator } = inputs
   return Object.freeze({
-    transactions: [
-      launchTransaction('create config', creator, blockhash, [createConfig]),
-      launchTransaction('create pool', creator, blockhash, [createPool]),
-      launchTransaction('open market', creator, blockhash, openMarketInstructions(inputs, accounts)),
-    ],
-    signers: [[configKeypair], [baseMintKeypair], []],
+    transactions: steps.map((step) => launchTransaction(step.label, creator, blockhash, step.instructions)),
+    signers: steps.map((step) => [...step.signers]),
     config: accounts.config,
     pool: accounts.pool,
     baseMint: accounts.baseMint,
