@@ -134,6 +134,12 @@ export interface BuyParams {
   readonly user: PublicKey
   readonly amountIn: bigint
   readonly minOut: bigint
+  /**
+   * Native Referral: the referrer's wallet (may be off curve, e.g. a PDA). DBC pays its referral cut, taken out of
+   * the protocol fee, to the referrer's canonical quote ATA; the buyer's cost and basis do not change. Ignored when
+   * equal to `user`.
+   */
+  readonly referrer?: PublicKey
 }
 
 /** Router sell (exit at cost before graduation). */

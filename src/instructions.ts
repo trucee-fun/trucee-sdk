@@ -137,6 +137,12 @@ const isNativeQuote = (accounts: MarketAccounts): boolean =>
   accounts.quoteMint.toBase58() === NATIVE_MINT.toBase58() && accounts.quoteTokenProgram.toBase58() === TOKEN_PROGRAM_ID.toBase58()
 const quoteAtaOf = (accounts: MarketAccounts, owner: PublicKey): PublicKey =>
   getAssociatedTokenAddressSync(accounts.quoteMint, owner, false, accounts.quoteTokenProgram)
+/**
+ * allowOwnerOffCurve: a referrer may be a PDA wallet. The router only checks that the referral account is writable,
+ * owned by the quote token program, of the quote mint and not a vault, so any owner works.
+ */
+const referrerQuoteAtaOf = (accounts: MarketAccounts, referrer: PublicKey): PublicKey =>
+  getAssociatedTokenAddressSync(accounts.quoteMint, referrer, true, accounts.quoteTokenProgram)
 const baseAtaOf = (accounts: MarketAccounts, owner: PublicKey): PublicKey =>
   getAssociatedTokenAddressSync(accounts.baseMint, owner, false, TOKEN_2022_PROGRAM_ID)
 
@@ -160,6 +166,30 @@ function requireSwapContext(p: unknown, builder: string): SwapContext {
   const cluster = requireCluster(params.cluster)
   const accounts = requireQuoteTokenProgram(requireMarketAccounts(params.accounts))
   return { cluster, accounts, user: requireKey(params.user, 'user') }
+}
+
+/** Optional buy referrer: null when absent (undefined) or a self-referral, which is ignored; otherwise a PublicKey. */
+function optionalReferrer(value: unknown, user: PublicKey): PublicKey | null {
+  if (value === undefined) return null
+  const referrer = requireKey(value, 'referrer')
+  return referrer.toBase58() === user.toBase58() ? null : referrer
+}
+
+/** What a referrer adds to a buy: the idempotent creation of its quote ATA (user pays) and that ATA as remaining account. */
+interface ReferralParts {
+  readonly createAta: readonly TransactionInstruction[]
+  readonly remaining: readonly AccountMeta[]
+}
+
+const NO_REFERRAL: ReferralParts = Object.freeze({ createAta: Object.freeze([]), remaining: Object.freeze([]) })
+
+function referralParts(accounts: MarketAccounts, user: PublicKey, referrer: PublicKey | null): ReferralParts {
+  if (referrer === null) return NO_REFERRAL
+  const referral = referrerQuoteAtaOf(accounts, referrer)
+  return {
+    createAta: [createAssociatedTokenAccountIdempotentInstruction(user, referral, referrer, accounts.quoteMint, accounts.quoteTokenProgram)],
+    remaining: [writableMeta(referral)],
+  }
 }
 
 /**
@@ -187,8 +217,15 @@ function dbcSwapAndHookMetas(cluster: ClusterConfig, accounts: MarketAccounts): 
   ]
 }
 
-/** Router `Swap` accounts shared by buy and sell, then the hook's remaining accounts. */
-function routerSwapInstruction({ cluster, accounts, user }: SwapContext, data: Buffer): TransactionInstruction {
+/**
+ * Router `Swap` accounts shared by buy and sell, then the hook's remaining accounts, then `extraRemaining` (a buy's
+ * optional referral token account, the 4th remaining account; a sell takes none).
+ */
+function routerSwapInstruction(
+  { cluster, accounts, user }: SwapContext,
+  data: Buffer,
+  extraRemaining: readonly AccountMeta[] = [],
+): TransactionInstruction {
   const keys: AccountMeta[] = [
     signerMeta(user, true),
     writableMeta(accounts.market),
@@ -197,6 +234,7 @@ function routerSwapInstruction({ cluster, accounts, user }: SwapContext, data: B
     writableMeta(baseAtaOf(accounts, user)),
     writableMeta(accounts.bufferVault),
     ...dbcSwapAndHookMetas(cluster, accounts),
+    ...extraRemaining,
   ]
   return new TransactionInstruction({ programId: cluster.routerProgramId, keys, data })
 }
@@ -206,12 +244,19 @@ function routerSwapInstruction({ cluster, accounts, user }: SwapContext, data: B
 /**
  * Buy through the router: idempotently creates the user's quote and base (Token-2022) ATAs, wraps exactly
  * `amountIn` lamports first when the quote mint is native SOL, then calls the router `buy`.
+ *
+ * With a `referrer` other than the user, the user also idempotently creates the referrer's canonical quote ATA
+ * (under the quote token program, off-curve owners allowed) right before the buy, and the buy names that ATA as its
+ * 4th remaining account (writable, not a signer), where DBC pays its referral cut. A self-referral is ignored.
+ *
+ * @throws TypeError when `referrer` is present but not a PublicKey.
  */
 export function buyInstructions(p: BuyParams): TransactionInstruction[] {
   const context = requireSwapContext(p, 'buyInstructions')
   const amountIn = requireU64(p.amountIn, 'amountIn', 1n)
   const minOut = requireU64(p.minOut, 'minOut', 0n)
   const { accounts, user } = context
+  const referral = referralParts(accounts, user, optionalReferrer(p.referrer, user))
   const quoteAta = quoteAtaOf(accounts, user)
   const createAtas = [
     createAssociatedTokenAccountIdempotentInstruction(user, quoteAta, user, accounts.quoteMint, accounts.quoteTokenProgram),
@@ -223,7 +268,8 @@ export function buyInstructions(p: BuyParams): TransactionInstruction[] {
         createSyncNativeInstruction(quoteAta, accounts.quoteTokenProgram),
       ]
     : []
-  return [...createAtas, ...wrapSol, routerSwapInstruction(context, encodeData(DISCRIMINATORS.buy, [amountIn, minOut]))]
+  const buy = routerSwapInstruction(context, encodeData(DISCRIMINATORS.buy, [amountIn, minOut]), referral.remaining)
+  return [...createAtas, ...wrapSol, ...referral.createAta, buy]
 }
 
 /**
