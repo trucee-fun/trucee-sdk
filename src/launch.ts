@@ -3,8 +3,9 @@
  *
  * Preset rules (docs/trucee-plan.md §Preset rules): no creator token allocation (no locked vesting); a static,
  * quote-collected fee (the router's read_config rejects fee schedulers, rate limiters and dynamic fees); a Token-2022
- * base whose transfer hook is zpvp_hook; DAMM v2 migration. Retention Fee / Leftover are not built, so the fee claimer
- * and the leftover receiver are plain wallets chosen by the caller, never a Trucee PDA.
+ * base whose transfer hook is zpvp_hook; DAMM v2 migration; dynamic supply and fully, permanently locked LP (the
+ * router's init_market rejects anything else with PresetNotAllowed). Retention Fee / Leftover are not built, so the
+ * fee claimer and the leftover receiver are plain wallets chosen by the caller, never a Trucee PDA.
  */
 import { Buffer } from 'buffer'
 import {
@@ -244,20 +245,34 @@ function curveParams(preset: Preset): BuildCurveParams {
   }
 }
 
+/** The router's init_market rejects a fixed supply (fixed_token_supply_flag 1) with PresetNotAllowed (6023). */
+function assertDynamicSupply(tokenSupply: ConfigParameters['tokenSupply']): void {
+  if (tokenSupply !== null) throw new RangeError('the Zero-PvP preset must use dynamic supply (tokenSupply null), got a fixed supply')
+}
+
 function zeroPvpConfigParameters(preset: Preset): ConfigParameters {
-  // buildCurve leaves the reserved [u8; 2] padding empty; spell it out as the IDL declares it.
-  const params: ConfigParameters = { ...buildCurve(curveParams(preset)), padding: [0, 0] }
+  const params: ConfigParameters = {
+    ...buildCurve(curveParams(preset)),
+    // buildCurve always returns a fixed supply { pre, post: totalSupply }. The preset is dynamic supply: DBC mints what
+    // the curve needs and burns the leftover at migration, so no unsold supply ever reaches the leftover receiver.
+    tokenSupply: null,
+    // buildCurve leaves the reserved [u8; 2] padding empty; spell it out as the IDL declares it.
+    padding: [0, 0],
+  }
   assertExact(params.migrationQuoteThreshold, preset.migrationQuoteThreshold, 'migrationQuoteThreshold')
-  assertExact(params.tokenSupply?.preMigrationTokenSupply, preset.totalTokenSupply, 'totalTokenSupply')
+  assertDynamicSupply(params.tokenSupply)
   validateConfigParameters({ ...params, leftoverReceiver: preset.leftoverReceiver }, { isTransferHook: true })
   return params
 }
 
 /**
  * DBC ConfigParameters for a transfer-hook pool the router accepts: static cliff fee of `feeBps * 1e5` / 1e9
- * collected in quote, no scheduler periods, no dynamic fee, Token-2022 base (6 decimals), DAMM v2 migration, no
- * locked vesting. Defaults: 1_000_000_000 tokens (`totalTokenSupply` is in raw base units), 20% of supply on
- * migration. Throws when `migrationQuoteThreshold` exceeds `quote.maxMigrationQuoteThreshold`.
+ * collected in quote, no scheduler periods, no dynamic fee, Token-2022 base (6 decimals), DAMM v2 migration with no
+ * migration fee, partner LP 100% permanently locked, no locked vesting, dynamic supply (`tokenSupply` null; DBC burns
+ * the leftover at migration). `totalTokenSupply` (raw base units) and `percentageSupplyOnMigration` shape the curve so
+ * that the supply DBC mints for the pool (swap amount with buffer + migration amount) is `totalTokenSupply`. Defaults:
+ * 1_000_000_000 tokens, 20% of supply on migration. Throws when `migrationQuoteThreshold` exceeds
+ * `quote.maxMigrationQuoteThreshold`.
  */
 export function buildZeroPvpConfigParameters(opts: PresetOptions): ConfigParameters {
   return zeroPvpConfigParameters(requirePreset(opts))

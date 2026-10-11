@@ -16,7 +16,7 @@ import {
   type TransactionInstruction,
 } from '@solana/web3.js'
 import { NATIVE_MINT } from '@solana/spl-token'
-import { DYNAMIC_BONDING_CURVE_PROGRAM_ID, deriveDbcPoolAddress } from '@meteora-ag/dynamic-bonding-curve-sdk'
+import { DYNAMIC_BONDING_CURVE_PROGRAM_ID, deriveDbcPoolAddress, getTotalSupplyFromCurve } from '@meteora-ag/dynamic-bonding-curve-sdk'
 import { FailedTransactionMetadata, type LiteSVM } from 'litesvm'
 import { beforeAll, describe, expect, it } from 'vitest'
 import {
@@ -110,15 +110,17 @@ describe('buildZeroPvpConfigParameters', () => {
     expect(params.enableFirstSwapWithMinFee).toBe(false)
   })
 
-  it('pins the Zero-PvP token and migration rules (Token-2022, DAMM v2, no creator allocation)', () => {
+  it('pins the Zero-PvP token and migration rules (Token-2022, DAMM v2, no migration fee, dynamic supply, no creator allocation)', () => {
     const params = buildZeroPvpConfigParameters(presetOf())
 
     expect(params).toMatchObject({
       tokenType: 1, tokenDecimal: BASE_DECIMALS, migrationOption: 1, activationType: 0, tokenUpdateAuthority: 1,
       partnerLiquidityPercentage: 0, partnerPermanentLockedLiquidityPercentage: 100,
       creatorLiquidityPercentage: 0, creatorPermanentLockedLiquidityPercentage: 0, creatorTradingFeePercentage: 0,
-      migrationFee: { feePercentage: 0, creatorFeePercentage: 0 }, padding: [0, 0],
+      migrationFee: { feePercentage: 0, creatorFeePercentage: 0 }, tokenSupply: null, padding: [0, 0],
     })
+    expect(params.partnerLiquidityVestingInfo?.vestingPercentage ?? 0).toBe(0)
+    expect(params.creatorLiquidityVestingInfo?.vestingPercentage ?? 0).toBe(0)
     expect(params.poolCreationFee.toString()).toBe('0')
     const vesting = params.lockedVesting
     ;[vesting.amountPerPeriod, vesting.cliffDurationFromMigrationTime, vesting.frequency, vesting.numberOfPeriod, vesting.cliffUnlockAmount]
@@ -127,22 +129,27 @@ describe('buildZeroPvpConfigParameters', () => {
     expect(params.curve.length).toBeGreaterThan(0)
   })
 
-  it('defaults to 1_000_000_000 tokens and 20% of supply on migration', () => {
+  it('defaults to 1_000_000_000 tokens and 20% of supply on migration, with dynamic supply', () => {
     const defaults = buildZeroPvpConfigParameters(presetOf())
     const explicit = buildZeroPvpConfigParameters(presetOf({ totalTokenSupply: ONE_BILLION_TOKENS, percentageSupplyOnMigration: 20 }))
     const otherShape = buildZeroPvpConfigParameters(presetOf({ percentageSupplyOnMigration: 30 }))
 
-    expect(defaults.tokenSupply?.preMigrationTokenSupply.toString()).toBe(ONE_BILLION_TOKENS.toString())
-    expect(defaults.tokenSupply?.postMigrationTokenSupply.toString()).toBe(ONE_BILLION_TOKENS.toString())
+    expect(defaults.tokenSupply).toBeNull()
     expect(JSON.stringify(defaults)).toBe(JSON.stringify(explicit))
     expect(otherShape.sqrtStartPrice.toString()).not.toBe(defaults.sqrtStartPrice.toString())
   })
 
-  it('honours a custom total supply in raw base units', () => {
-    const supply = 500_000_000n * 10n ** BigInt(BASE_DECIMALS)
-    const params = buildZeroPvpConfigParameters(presetOf({ totalTokenSupply: supply }))
+  it.each([
+    ['the default supply', undefined, ONE_BILLION_TOKENS],
+    ['a custom supply', 500_000_000n * 10n ** BigInt(BASE_DECIMALS), 500_000_000n * 10n ** BigInt(BASE_DECIMALS)],
+  ])('shapes the curve so DBC mints %s in raw base units, with the supply left dynamic', (_label, totalTokenSupply, minted) => {
+    const params = buildZeroPvpConfigParameters(presetOf({ totalTokenSupply }))
+    // What DBC mints for a dynamic-supply pool: the swap amount with its buffer plus the migration amount.
+    const dynamicSupply = getTotalSupplyFromCurve(params.migrationQuoteThreshold, params.sqrtStartPrice, params.curve, params.lockedVesting,
+      params.migrationOption, new BN(0), params.migrationFee.feePercentage)
 
-    expect(params.tokenSupply?.preMigrationTokenSupply.toString()).toBe(supply.toString())
+    expect(params.tokenSupply).toBeNull()
+    expect(dynamicSupply.toString()).toBe(minted.toString())
   })
 
   it('accepts a threshold equal to the quote cap and throws one lamport above it', () => {
