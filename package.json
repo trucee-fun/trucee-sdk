@@ -1,0 +1,36 @@
+{
+  "name": "@trucee/sdk",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Trucee (Zero-PvP curve) client SDK: router accounts, events, instructions, launch preset and quotes",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@meteora-ag/dynamic-bonding-curve-sdk": "^1.5.13",
+    "@solana/spl-token": "^0.4.15",
+    "@solana/web3.js": "^1.99.0",
+    "bn.js": "^5.2.5"
+  },
+  "devDependencies": {
+    "@types/bn.js": "^5.2.0",
+    "@types/node": "^26.6.4",
+    "litesvm": "^0.8.0",
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.3"
+  }
+}
