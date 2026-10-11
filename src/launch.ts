@@ -74,8 +74,11 @@ const MAX_PERCENTAGE = 100
 const MAX_NAME_BYTES = 32
 const MAX_SYMBOL_BYTES = 10
 const MAX_URI_BYTES = 200
-/** The initial buy shares the transaction that opens the market, so it is the pool's first possible trade. */
-const INITIAL_BUY_MIN_OUT = 0n
+/**
+ * On a fresh launch the initial buy shares the transaction that opens the market, so it is the pool's first possible
+ * trade and needs no bound. A resumed buy runs at the current price, so the caller passes its quote instead.
+ */
+const DEFAULT_INITIAL_BUY_MIN_OUT = 0n
 
 /** A resume reads at 'confirmed' so a retry right after a failed transaction sees the accounts that just landed. */
 const LAUNCH_ACCOUNTS_COMMITMENT: Commitment = 'confirmed'
@@ -352,6 +355,7 @@ interface LaunchInputs {
   readonly uri: string
   readonly preset: Preset
   readonly initialBuy: bigint
+  readonly initialBuyMinOut: bigint
   /** Set only when resuming the first plan. */
   readonly resumeKeys: ResumeKeys | undefined
 }
@@ -401,6 +405,9 @@ function requireLaunchParams(p: unknown): LaunchInputs {
     uri: requireText(params.uri, 'uri', 0, MAX_URI_BYTES),
     preset: requirePreset({ ...params.preset, quote }),
     initialBuy: params.initialBuy === undefined ? 0n : requireU64(params.initialBuy, 'initialBuy', 0n),
+    initialBuyMinOut: params.initialBuyMinOut === undefined
+      ? DEFAULT_INITIAL_BUY_MIN_OUT
+      : requireU64(params.initialBuyMinOut, 'initialBuyMinOut', 0n),
     resumeKeys: requireResumeKeys(params),
   }
 }
@@ -607,13 +614,13 @@ async function dbcInstructions(
  * and the creator holds no position yet (a resumed plan never buys twice).
  */
 function openMarketInstructions(inputs: LaunchInputs, a: LaunchAccounts, existing: ExistingAccounts): TransactionInstruction[] {
-  const { cluster, creator, initialBuy } = inputs
+  const { cluster, creator, initialBuy, initialBuyMinOut } = inputs
   const hookInit = existing.extraMetas ? [] : [initExtraAccountMetasInstruction(creator, a.baseMint, cluster.hookProgramId)]
   const marketInit = existing.market
     ? []
     : [initMarketInstruction({ cluster, payer: creator, pool: a.pool, config: a.config, quoteMint: a.quoteMint, quoteTokenProgram: a.quoteTokenProgram })]
   const buy = initialBuy > 0n && !existing.position
-    ? buyInstructions({ cluster, accounts: a, user: creator, amountIn: initialBuy, minOut: INITIAL_BUY_MIN_OUT })
+    ? buyInstructions({ cluster, accounts: a, user: creator, amountIn: initialBuy, minOut: initialBuyMinOut })
     : []
   return [...hookInit, ...marketInit, ...buy]
 }
@@ -628,20 +635,22 @@ interface LaunchStep {
 /**
  * Transactions that launch a Zero-PvP token, to send in order: [0] create the DBC config (extra signer: the config
  * keypair), [1] create the pool with metadata name/symbol/uri (extra signer: the base mint keypair), [2] init the
- * hook's extra-account-metas and the router market, plus the creator's buy when `initialBuy` > 0. Every transaction
- * has fee payer = creator and a recent blockhash, and fits one packet. The preset quote must be allowed by the
- * cluster, whose QuoteMintInfo (cap, programs, badge) is authoritative. Throws on invalid input, including a uri
- * above 200 bytes or a threshold above the quote cap.
+ * hook's extra-account-metas and the router market, plus the creator's buy when `initialBuy` > 0. The buy's minOut is
+ * `initialBuyMinOut` (default 0n), so DBC fails it with ExceededSlippage when it would return fewer base tokens. Every
+ * transaction has fee payer = creator and a recent blockhash, and fits one packet. The preset quote must be allowed by
+ * the cluster, whose QuoteMintInfo (cap, programs, badge) is authoritative. Throws on invalid input, including a uri
+ * above 200 bytes, a threshold above the quote cap, or an `initialBuyMinOut` outside u64.
  *
  * Resume: pass the first plan's config keypair (its signers[0][0]) as `configKeypair` and its base-mint keypair
  * (signers[1][0]) as `baseMintKeypair`; both or neither. The plan then fetches the config, pool, extra-metas, market
  * and the creator's position in one getMultipleAccountsInfo call and leaves out what already exists (the hook init
  * and init_market are permissionless, so a third party may have sent them). The buy is left out once the creator
  * holds a position, so a fully launched market yields no transaction even with `initialBuy` > 0; a market a third
- * party opened yields just the buy. `signers[i]` stays aligned with the transactions that remain. Throws when an
- * existing account belongs to another launch: a config with another quote, wallets, threshold, fee or hook, a pool
- * with another config, base mint or creator, or a market with another pool, config or base mint. A first build with
- * fresh keypairs makes no account request, since nothing can exist yet.
+ * party opened yields just the buy, which then runs at the current price: pass the creator's fresh quote as
+ * `initialBuyMinOut` so a sandwich cannot fill it below that quote. `signers[i]` stays aligned with the transactions
+ * that remain. Throws when an existing account belongs to another launch: a config with another quote, wallets,
+ * threshold, fee or hook, a pool with another config, base mint or creator, or a market with another pool, config or
+ * base mint. A first build with fresh keypairs makes no account request, since nothing can exist yet.
  */
 export async function buildLaunchPlan(p: LaunchParams): Promise<LaunchPlan> {
   const inputs = requireLaunchParams(p)

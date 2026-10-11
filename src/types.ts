@@ -212,6 +212,11 @@ export interface LaunchParams {
   readonly uri: string
   readonly preset: PresetOptions
   readonly initialBuy?: bigint
+  /**
+   * Least base tokens (raw units) the initial buy must return, else DBC fails it with ExceededSlippage; default 0n.
+   * Pass the creator's confirmed quote on a resume: the market already exists, so the buy runs at the current price.
+   */
+  readonly initialBuyMinOut?: bigint
   /** Resume: the first plan's config keypair (its `signers[0][0]`); a fresh one is generated when absent. */
   readonly configKeypair?: Keypair
   /** Resume: the first plan's base-mint keypair (its `signers[1][0]`); a fresh one is generated when absent. */
