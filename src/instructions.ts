@@ -1,6 +1,6 @@
 /**
- * Instruction builders for the router (init_market, buy, sell, finalize, claim_surplus) and the hook
- * (initialize_extra_account_meta_list). Account orders follow zpvp/programs/{zpvp_router,zpvp_hook}/src/lib.rs.
+ * Instruction builders for the router (init_market, buy, sell, finalize, claim_surplus, set_auto_exit, auto_exit)
+ * and the hook (initialize_extra_account_meta_list). Account orders follow zpvp/programs/{zpvp_router,zpvp_hook}/src/lib.rs.
  */
 import { Buffer } from 'buffer'
 import {
@@ -13,8 +13,10 @@ import {
 import {
   NATIVE_MINT,
   TOKEN_2022_PROGRAM_ID,
+  createApproveCheckedInstruction,
   createAssociatedTokenAccountIdempotentInstruction,
   createCloseAccountInstruction,
+  createRevokeInstruction,
   createSyncNativeInstruction,
   getAssociatedTokenAddressSync,
 } from '@solana/spl-token'
@@ -22,6 +24,7 @@ import { deriveDbcEventAuthority, deriveDbcPoolAuthority } from '@meteora-ag/dyn
 import { HOOK_PROGRAM_ID } from './constants.js'
 import { findBufferPda, findExtraAccountMetasPda, findMarketPda, findPositionPda } from './pda.js'
 import type {
+  AutoExitParams,
   BuyParams,
   ClaimParams,
   ClusterConfig,
@@ -29,6 +32,7 @@ import type {
   InitMarketParams,
   MarketAccounts,
   SellParams,
+  SetAutoExitParams,
 } from './types.js'
 
 /** sha256("global:<instruction>")[..8], the Anchor instruction discriminators. */
@@ -38,13 +42,20 @@ const DISCRIMINATORS = Object.freeze({
   finalize: Object.freeze([171, 61, 218, 56, 127, 115, 12, 217]),
   claimSurplus: Object.freeze([195, 35, 205, 205, 177, 146, 141, 62]),
   initMarket: Object.freeze([33, 253, 15, 116, 89, 25, 127, 236]),
+  setAutoExit: Object.freeze([60, 166, 18, 156, 35, 166, 156, 226]),
+  autoExit: Object.freeze([69, 201, 207, 131, 57, 141, 243, 167]),
   initializeExtraAccountMetaList: Object.freeze([92, 197, 174, 197, 41, 124, 19, 3]),
 })
 
 const DISCRIMINATOR_SIZE = 8
 const U64_SIZE = 8
 const U64_MAX = 2n ** 64n - 1n
+const I64_MAX = 2n ** 63n - 1n
 const PUBLIC_KEY_LENGTH = 32
+/** `set_auto_exit` deadline that disables Auto-Exit. */
+const AUTO_EXIT_DISABLED = 0n
+/** Decimals of every Trucee base mint (DBC config tokenDecimal); approveChecked fails on any other mint. */
+const BASE_TOKEN_DECIMALS = 6
 
 const MARKET_ACCOUNT_FIELDS = Object.freeze([
   'market', 'pool', 'config', 'baseMint', 'quoteMint', 'baseVault', 'quoteVault', 'bufferVault', 'quoteTokenProgram',
@@ -74,6 +85,15 @@ function requireU64(value: unknown, name: string, min: bigint): bigint {
   return value
 }
 
+/** Auto-Exit deadline: unix seconds as a non-negative i64 bigint; 0n disables. */
+function requireDeadline(value: unknown): bigint {
+  if (typeof value !== 'bigint') throw new TypeError(`deadline must be a bigint of unix seconds (0n disables), got ${typeof value}`)
+  if (value < AUTO_EXIT_DISABLED || value > I64_MAX) {
+    throw new RangeError(`deadline must be between ${AUTO_EXIT_DISABLED} and ${I64_MAX} unix seconds, got ${value}`)
+  }
+  return value
+}
+
 function requireCluster(cluster: unknown): ClusterConfig {
   requireObject(cluster, 'cluster')
   CLUSTER_PROGRAM_FIELDS.forEach((field) => requireKey((cluster as ClusterConfig)[field], `cluster.${field}`))
@@ -84,6 +104,15 @@ function requireMarketAccounts(accounts: unknown): MarketAccounts {
   requireObject(accounts, 'accounts')
   MARKET_ACCOUNT_FIELDS.forEach((field) => requireKey((accounts as MarketAccounts)[field], `accounts.${field}`))
   return accounts as MarketAccounts
+}
+
+/** The router market PDA of `accounts.pool`; throws unless `accounts.market` is exactly that PDA. */
+function requireMarketPda(cluster: ClusterConfig, accounts: MarketAccounts): PublicKey {
+  const market = findMarketPda(accounts.pool, cluster.routerProgramId)
+  if (market.toBase58() !== accounts.market.toBase58()) {
+    throw new Error(`accounts.market ${accounts.market.toBase58()} is not the router market PDA of accounts.pool (${market.toBase58()})`)
+  }
+  return market
 }
 
 /* ---------- encoding and account metas ---------- */
@@ -118,15 +147,12 @@ function requireSwapContext(p: unknown, builder: string): SwapContext {
   return { cluster: requireCluster(params.cluster), accounts: requireMarketAccounts(params.accounts), user: requireKey(params.user, 'user') }
 }
 
-/** Router `Swap` accounts shared by buy and sell, then the hook's remaining accounts. */
-function routerSwapInstruction({ cluster, accounts, user }: SwapContext, data: Buffer): TransactionInstruction {
-  const keys: AccountMeta[] = [
-    signerMeta(user, true),
-    writableMeta(accounts.market),
-    writableMeta(findPositionPda(accounts.market, user, cluster.routerProgramId)),
-    writableMeta(quoteAtaOf(accounts, user)),
-    writableMeta(baseAtaOf(accounts, user)),
-    writableMeta(accounts.bufferVault),
+/**
+ * The DBC swap accounts that follow `buffer_vault` in the router's `Swap` and `AutoExit` structs (pool authority
+ * through system program), then the hook's remaining accounts.
+ */
+function dbcSwapAndHookMetas(cluster: ClusterConfig, accounts: MarketAccounts): AccountMeta[] {
+  return [
     readonlyMeta(deriveDbcPoolAuthority()),
     readonlyMeta(accounts.config),
     writableMeta(accounts.pool),
@@ -143,6 +169,19 @@ function routerSwapInstruction({ cluster, accounts, user }: SwapContext, data: B
     readonlyMeta(findExtraAccountMetasPda(accounts.baseMint, cluster.hookProgramId)),
     readonlyMeta(SYSVAR_INSTRUCTIONS_PUBKEY),
     readonlyMeta(cluster.hookProgramId),
+  ]
+}
+
+/** Router `Swap` accounts shared by buy and sell, then the hook's remaining accounts. */
+function routerSwapInstruction({ cluster, accounts, user }: SwapContext, data: Buffer): TransactionInstruction {
+  const keys: AccountMeta[] = [
+    signerMeta(user, true),
+    writableMeta(accounts.market),
+    writableMeta(findPositionPda(accounts.market, user, cluster.routerProgramId)),
+    writableMeta(quoteAtaOf(accounts, user)),
+    writableMeta(baseAtaOf(accounts, user)),
+    writableMeta(accounts.bufferVault),
+    ...dbcSwapAndHookMetas(cluster, accounts),
   ]
   return new TransactionInstruction({ programId: cluster.routerProgramId, keys, data })
 }
@@ -249,4 +288,64 @@ export function initExtraAccountMetasInstruction(
     readonlyMeta(SystemProgram.programId),
   ]
   return new TransactionInstruction({ programId: hook, keys, data: encodeData(DISCRIMINATORS.initializeExtraAccountMetaList) })
+}
+
+/**
+ * Owner enables or disables Auto-Exit of their position.
+ *
+ * deadline > 0n: approveChecked of the owner's canonical base ATA (Token-2022) to the market PDA for u64::MAX, then
+ * `set_auto_exit(deadline)`. The u64::MAX allowance keeps later buys covered, so the crank always sells the whole
+ * position. deadline 0n: `set_auto_exit(0)`, then revoke that ATA's delegate. The router rejects a non-zero
+ * deadline that is not strictly after the chain clock (AutoExitDeadlineInPast).
+ *
+ * @throws when `accounts.market` is not the market PDA of `accounts.pool` (never approves another delegate).
+ */
+export function setAutoExitInstructions(p: SetAutoExitParams): TransactionInstruction[] {
+  requireObject(p, 'setAutoExitInstructions params')
+  const cluster = requireCluster(p.cluster)
+  const accounts = requireMarketAccounts(p.accounts)
+  const owner = requireKey(p.owner, 'owner')
+  const deadline = requireDeadline(p.deadline)
+  const market = requireMarketPda(cluster, accounts)
+  const ownerBase = baseAtaOf(accounts, owner)
+  const keys = [
+    signerMeta(owner, false),
+    readonlyMeta(market),
+    writableMeta(findPositionPda(market, owner, cluster.routerProgramId)),
+  ]
+  // The deadline is an i64; a value in [0, i64::MAX] has the same little-endian bytes as the u64 encodeData writes.
+  const setAutoExit = new TransactionInstruction({
+    programId: cluster.routerProgramId, keys, data: encodeData(DISCRIMINATORS.setAutoExit, [deadline]),
+  })
+  if (deadline === AUTO_EXIT_DISABLED) {
+    return [setAutoExit, createRevokeInstruction(ownerBase, owner, [], TOKEN_2022_PROGRAM_ID)]
+  }
+  const approve = createApproveCheckedInstruction(
+    ownerBase, accounts.baseMint, market, owner, U64_MAX, BASE_TOKEN_DECIMALS, [], TOKEN_2022_PROGRAM_ID,
+  )
+  return [approve, setAutoExit]
+}
+
+/**
+ * Permissionless once the owner's deadline has passed and while the curve is live: `cranker` signs and the market
+ * PDA sells the whole position as the owner's token delegate. The refund lands in the owner's canonical quote ATA,
+ * which must exist (prepend an idempotent ATA creation, paid by the cranker, if the owner may have closed it).
+ */
+export function autoExitInstruction(p: AutoExitParams): TransactionInstruction {
+  requireObject(p, 'autoExitInstruction params')
+  const cluster = requireCluster(p.cluster)
+  const accounts = requireMarketAccounts(p.accounts)
+  const cranker = requireKey(p.cranker, 'cranker')
+  const owner = requireKey(p.owner, 'owner')
+  const keys = [
+    signerMeta(cranker, false),
+    readonlyMeta(owner),
+    writableMeta(accounts.market),
+    writableMeta(findPositionPda(accounts.market, owner, cluster.routerProgramId)),
+    writableMeta(quoteAtaOf(accounts, owner)),
+    writableMeta(baseAtaOf(accounts, owner)),
+    writableMeta(accounts.bufferVault),
+    ...dbcSwapAndHookMetas(cluster, accounts),
+  ]
+  return new TransactionInstruction({ programId: cluster.routerProgramId, keys, data: encodeData(DISCRIMINATORS.autoExit) })
 }

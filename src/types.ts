@@ -108,7 +108,24 @@ export interface FinalizeEvent {
   readonly totalBasis: bigint
 }
 
-export type RouterEvent = BuyEvent | SellEvent | ClaimEvent | FinalizeEvent
+/** `set_auto_exit`: the owner stored (or, with 0, cleared) the position's Auto-Exit deadline. */
+export interface AutoExitSetEvent {
+  readonly name: 'AutoExitSetEvent'
+  readonly market: PublicKey
+  readonly user: PublicKey
+  /** Unix seconds (i64) from which anyone may auto-exit the position; 0 = disabled. */
+  readonly deadline: bigint
+}
+
+/** `auto_exit`: `cranker` exited `user`'s whole position at cost (emitted right after its SellEvent). */
+export interface AutoExitEvent {
+  readonly name: 'AutoExitEvent'
+  readonly market: PublicKey
+  readonly user: PublicKey
+  readonly cranker: PublicKey
+}
+
+export type RouterEvent = BuyEvent | SellEvent | ClaimEvent | FinalizeEvent | AutoExitSetEvent | AutoExitEvent
 
 /** Router buy; wraps SOL first when the quote mint is native. */
 export interface BuyParams {
@@ -137,6 +154,23 @@ export interface FinalizeParams {
 
 /** Permissionless surplus claim: `cranker` signs, the share goes to `owner`. */
 export interface ClaimParams {
+  readonly cluster: ClusterConfig
+  readonly accounts: MarketAccounts
+  readonly cranker: PublicKey
+  readonly owner: PublicKey
+}
+
+/** Owner enables (deadline > 0n) or disables (0n) Auto-Exit of their position. */
+export interface SetAutoExitParams {
+  readonly cluster: ClusterConfig
+  readonly accounts: MarketAccounts
+  readonly owner: PublicKey
+  /** Unix seconds from which anyone may auto-exit the position; 0n disables. */
+  readonly deadline: bigint
+}
+
+/** Permissionless Auto-Exit once the deadline has passed: `cranker` signs, the refund goes to `owner`. */
+export interface AutoExitParams {
   readonly cluster: ClusterConfig
   readonly accounts: MarketAccounts
   readonly cranker: PublicKey

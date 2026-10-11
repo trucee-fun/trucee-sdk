@@ -9,7 +9,15 @@
 import { Buffer } from 'buffer'
 import { PublicKey } from '@solana/web3.js'
 import { ROUTER_PROGRAM_ID } from './constants.js'
-import type { BuyEvent, ClaimEvent, FinalizeEvent, RouterEvent, SellEvent } from './types.js'
+import type {
+  AutoExitEvent,
+  AutoExitSetEvent,
+  BuyEvent,
+  ClaimEvent,
+  FinalizeEvent,
+  RouterEvent,
+  SellEvent,
+} from './types.js'
 
 /** Anchor event discriminators: sha256("event:<Name>")[..8]. */
 export const EVENT_DISCRIMINATORS: Readonly<Record<RouterEvent['name'], Buffer>> = Object.freeze({
@@ -17,11 +25,14 @@ export const EVENT_DISCRIMINATORS: Readonly<Record<RouterEvent['name'], Buffer>>
   SellEvent: Buffer.from([62, 47, 55, 10, 165, 3, 220, 42]),
   ClaimEvent: Buffer.from([93, 15, 70, 170, 48, 140, 212, 219]),
   FinalizeEvent: Buffer.from([115, 140, 131, 4, 181, 52, 170, 148]),
+  AutoExitSetEvent: Buffer.from([57, 162, 173, 84, 134, 215, 83, 159]),
+  AutoExitEvent: Buffer.from([53, 28, 54, 192, 105, 98, 182, 95]),
 })
 
 const DISCRIMINATOR_SIZE = 8
 const PUBKEY_SIZE = 32
-const U64_SIZE = 8
+/** u64 and i64 fields are both 8 bytes little-endian. */
+const INT64_SIZE = 8
 
 const PROGRAM_DATA_PREFIX = 'Program data: '
 const BASE58_ID = '[1-9A-HJ-NP-Za-km-z]{32,44}'
@@ -34,6 +45,7 @@ const BASE64_PAYLOAD = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/
 interface FieldReader {
   readonly pubkey: () => PublicKey
   readonly u64: () => bigint
+  readonly i64: () => bigint
 }
 
 interface EventLayout {
@@ -43,8 +55,8 @@ interface EventLayout {
   readonly decode: (read: FieldReader) => RouterEvent
 }
 
-const layoutSize = (pubkeys: number, u64s: number): number =>
-  DISCRIMINATOR_SIZE + pubkeys * PUBKEY_SIZE + u64s * U64_SIZE
+const layoutSize = (pubkeys: number, int64s: number): number =>
+  DISCRIMINATOR_SIZE + pubkeys * PUBKEY_SIZE + int64s * INT64_SIZE
 
 const decodeBuy = (read: FieldReader): BuyEvent => ({
   name: 'BuyEvent',
@@ -80,12 +92,28 @@ const decodeFinalize = (read: FieldReader): FinalizeEvent => ({
   totalBasis: read.u64(),
 })
 
+const decodeAutoExitSet = (read: FieldReader): AutoExitSetEvent => ({
+  name: 'AutoExitSetEvent',
+  market: read.pubkey(),
+  user: read.pubkey(),
+  deadline: read.i64(),
+})
+
+const decodeAutoExit = (read: FieldReader): AutoExitEvent => ({
+  name: 'AutoExitEvent',
+  market: read.pubkey(),
+  user: read.pubkey(),
+  cranker: read.pubkey(),
+})
+
 /** Layouts of zpvp_router's #[event] structs (ONC-10 source: every event leads with `market`). */
 const EVENT_LAYOUTS: readonly EventLayout[] = Object.freeze([
   { name: 'BuyEvent', size: layoutSize(2, 3), decode: decodeBuy },
   { name: 'SellEvent', size: layoutSize(2, 4), decode: decodeSell },
   { name: 'ClaimEvent', size: layoutSize(2, 2), decode: decodeClaim },
   { name: 'FinalizeEvent', size: layoutSize(1, 2), decode: decodeFinalize },
+  { name: 'AutoExitSetEvent', size: layoutSize(2, 1), decode: decodeAutoExitSet },
+  { name: 'AutoExitEvent', size: layoutSize(3, 0), decode: decodeAutoExit },
 ])
 
 const hasPrefix = (data: Uint8Array, prefix: Uint8Array): boolean =>
@@ -105,7 +133,8 @@ const createFieldReader = (data: Uint8Array): FieldReader => {
       const start = advance(PUBKEY_SIZE)
       return new PublicKey(data.slice(start, start + PUBKEY_SIZE))
     },
-    u64: () => view.getBigUint64(advance(U64_SIZE), true),
+    u64: () => view.getBigUint64(advance(INT64_SIZE), true),
+    i64: () => view.getBigInt64(advance(INT64_SIZE), true),
   }
 }
 

@@ -11,7 +11,15 @@ import {
   ROUTER_PROGRAM_ID,
   parseRouterEvents,
 } from '../src/index.js'
-import type { BuyEvent, ClaimEvent, FinalizeEvent, RouterEvent, SellEvent } from '../src/index.js'
+import type {
+  AutoExitEvent,
+  AutoExitSetEvent,
+  BuyEvent,
+  ClaimEvent,
+  FinalizeEvent,
+  RouterEvent,
+  SellEvent,
+} from '../src/index.js'
 
 const ROUTER = ROUTER_PROGRAM_ID.toBase58()
 const DBC = DBC_PROGRAM_ID.toBase58()
@@ -21,12 +29,19 @@ const U64_MAX = 2n ** 64n - 1n
 
 const MARKET = new PublicKey('9DveBfq3oS9BnUsPjHC1Qa7RgFJhuKRXGx9mK8bpvU9L')
 const USER = new PublicKey('FM1MD2v2DmNfveQ1nSazBobsSjKD5h98X7DziquuDhAR')
+const CRANKER = new PublicKey('De4NhSeH14hrU5uCvzKmCeRC8gBVu4GM7EkfpPfeLy63')
 
 // --- borsh encoding helpers (test side) ---
 
 const u64 = (value: bigint): Buffer => {
   const bytes = Buffer.alloc(8)
   new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).setBigUint64(0, value, true)
+  return bytes
+}
+
+const i64 = (value: bigint): Buffer => {
+  const bytes = Buffer.alloc(8)
+  new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).setBigInt64(0, value, true)
   return bytes
 }
 
@@ -52,6 +67,10 @@ const encodeEvent = (event: RouterEvent): Buffer => {
       return Buffer.concat([discriminator, key(event.market), key(event.user), u64(event.basis), u64(event.share)])
     case 'FinalizeEvent':
       return Buffer.concat([discriminator, key(event.market), u64(event.surplus), u64(event.totalBasis)])
+    case 'AutoExitSetEvent':
+      return Buffer.concat([discriminator, key(event.market), key(event.user), i64(event.deadline)])
+    case 'AutoExitEvent':
+      return Buffer.concat([discriminator, key(event.market), key(event.user), key(event.cranker)])
   }
 }
 
@@ -95,9 +114,15 @@ const CLAIM: ClaimEvent = {
 const FINALIZE: FinalizeEvent = {
   name: 'FinalizeEvent', market: MARKET, surplus: 43_449_744n, totalBasis: 0n,
 }
+const AUTO_EXIT_SET: AutoExitSetEvent = {
+  name: 'AutoExitSetEvent', market: MARKET, user: USER, deadline: 1_760_000_000n,
+}
+const AUTO_EXIT: AutoExitEvent = {
+  name: 'AutoExitEvent', market: MARKET, user: USER, cranker: CRANKER,
+}
 
 describe('parseRouterEvents: round trip', () => {
-  it.each([BUY, SELL, CLAIM, FINALIZE])('decodes every field of $name', (event) => {
+  it.each([BUY, SELL, CLAIM, FINALIZE, AUTO_EXIT_SET, AUTO_EXIT])('decodes every field of $name', (event) => {
     const events = parseRouterEvents(routerIx(eventLine(event)))
 
     expect(comparable(events)).toEqual(comparable([event]))
@@ -204,7 +229,7 @@ describe('parseRouterEvents: invoke stack', () => {
 })
 
 describe('parseRouterEvents: skipped payloads', () => {
-  it.each(['AutoExitSetEvent', 'AutoExitEvent'])('skips the unknown %s discriminator', (name) => {
+  it.each(['NotARouterEvent', 'UnknownEvent'])('skips the unknown %s discriminator', (name) => {
     const unknown = Buffer.concat([anchorEventDiscriminator(name), key(MARKET), key(USER), u64(1_760_000_000n)])
     const logs = routerIx(dataLine(unknown), eventLine(SELL))
 

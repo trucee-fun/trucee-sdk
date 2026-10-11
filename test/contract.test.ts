@@ -13,13 +13,15 @@ const EXPORTED_FUNCTIONS = [
   'decodeMarket', 'decodePosition', 'fetchMarket', 'fetchAllMarkets', 'fetchPositionsByOwner', 'marketAccountsFor',
   'parseRouterEvents',
   'buyInstructions', 'sellInstructions', 'finalizeInstruction', 'claimSurplusInstruction', 'initMarketInstruction',
-  'initExtraAccountMetasInstruction',
+  'initExtraAccountMetasInstruction', 'setAutoExitInstructions', 'autoExitInstruction',
   'buildZeroPvpConfigParameters', 'buildLaunchPlan',
   'refundFor', 'basisForExit', 'floorValue', 'quoteExit', 'quoteBuy',
   'decodeTxError',
 ] as const
 
-const EVENT_NAMES: readonly RouterEvent['name'][] = ['BuyEvent', 'SellEvent', 'ClaimEvent', 'FinalizeEvent']
+const EVENT_NAMES: readonly RouterEvent['name'][] = [
+  'BuyEvent', 'SellEvent', 'ClaimEvent', 'FinalizeEvent', 'AutoExitSetEvent', 'AutoExitEvent',
+]
 
 /** RouterError in zpvp/programs/zpvp_router/src/lib.rs, enum order from 6000. */
 const ROUTER_ERROR_NAMES = [
@@ -62,7 +64,7 @@ describe('constants', () => {
 })
 
 describe('event discriminators', () => {
-  it('cover exactly the four router events', () => {
+  it('cover exactly the six router events', () => {
     expect(Object.keys(sdk.EVENT_DISCRIMINATORS).sort()).toEqual([...EVENT_NAMES].sort())
     expect(Object.isFrozen(sdk.EVENT_DISCRIMINATORS)).toBe(true)
   })
