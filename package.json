@@ -2,8 +2,24 @@
   "name": "@trucee/sdk",
   "version": "0.1.0",
   "license": "MIT",
-  "private": true,
   "description": "Trucee (Zero-PvP curve) client SDK: router accounts, events, instructions, launch preset and quotes",
+  "keywords": [
+    "solana",
+    "meteora",
+    "dynamic-bonding-curve",
+    "dbc",
+    "token-2022",
+    "launchpad",
+    "trucee"
+  ],
+  "homepage": "https://docs.trucee.fun/quickstart",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/trucee-fun/trucee-sdk.git"
+  },
+  "bugs": {
+    "url": "https://github.com/trucee-fun/trucee-sdk/issues"
+  },
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -40,5 +56,8 @@
     "litesvm": "^0.8.0",
     "typescript": "^5.9.3",
     "vitest": "^5.0.3"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
