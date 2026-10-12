@@ -53,6 +53,10 @@ describe('constants', () => {
     expect(sdk.HAIRCUT_PER_EXIT).toBe(2n)
   })
 
+  it('exports the router launch fee cap in basis points', () => {
+    expect(sdk.ROUTER_MAX_FEE_BPS).toBe(100)
+  })
+
   it('account sizes match the borsh layouts (8-byte discriminator included)', () => {
     expect(sdk.MARKET_ACCOUNT_SIZE).toBe(274)
     expect(sdk.MARKET_ACCOUNT_SIZE).toBe(8 + 7 * 32 + 8 + 1 + 8 + 1 + 8 + 8 + 8)

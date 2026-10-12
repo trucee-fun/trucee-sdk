@@ -96,8 +96,13 @@ describe('ROUTER_ERRORS v5 additions', () => {
       name: 'PresetNotAllowed',
       message: 'Config breaks the Zero-PvP preset (creator allocation, fixed supply or unlocked LP)',
     })
-    expect(ROUTER_ERRORS[6024]).toBeUndefined()
-    expect(Object.keys(ROUTER_ERRORS)).toHaveLength(24)
+    expect(Object.keys(ROUTER_ERRORS)).toHaveLength(25)
+  })
+
+  it('6024 FeeTooHigh matches the router fee cap message', () => {
+    expect(ROUTER_ERRORS[6024]).toEqual({
+      name: 'FeeTooHigh', message: 'Config fee is above the 1% cap',
+    })
   })
 
   it('the hook table is unchanged', () => {
@@ -110,6 +115,7 @@ describe('decodeTxError: router errors from logs', () => {
     [6017, 'QuoteMintNotAllowed'],
     [6018, 'ThresholdTooHigh'],
     [6022, 'PositionCapExceeded'],
+    [6024, 'FeeTooHigh'],
     [6007, 'InvalidExitAmount'],
   ])('router %i decodes as %s', (code, name) => {
     const decoded = decodeTxError(simulationError(routerFailureLogs(code, name), code))

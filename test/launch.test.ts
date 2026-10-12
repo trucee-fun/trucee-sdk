@@ -3,8 +3,6 @@
  * tests execute a plan against DBC, zpvp_hook and the capped router (wSOL quote, threshold from
  * litesvm-diff/out/scenario_tiny.json).
  */
-import { readFileSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
 import { Buffer } from 'buffer'
 import BN from 'bn.js'
 import {
@@ -16,7 +14,7 @@ import {
   type TransactionInstruction,
 } from '@solana/web3.js'
 import { NATIVE_MINT } from '@solana/spl-token'
-import { DYNAMIC_BONDING_CURVE_PROGRAM_ID, deriveDbcPoolAddress, getTotalSupplyFromCurve } from '@meteora-ag/dynamic-bonding-curve-sdk'
+import { DYNAMIC_BONDING_CURVE_PROGRAM_ID, MIN_FEE_BPS, deriveDbcPoolAddress, getTotalSupplyFromCurve } from '@meteora-ag/dynamic-bonding-curve-sdk'
 import { FailedTransactionMetadata, type LiteSVM } from 'litesvm'
 import { beforeAll, describe, expect, it } from 'vitest'
 import {
@@ -31,7 +29,7 @@ import {
   getClusterConfig,
 } from '../src/index.js'
 import type { ClusterConfig, LaunchParams, LaunchPlan, PresetOptions, QuoteMintInfo } from '../src/index.js'
-import { CONFIG_MIGRATION_QUOTE_THRESHOLD_OFFSET, isCurveComplete, readU64, setupMarket } from './helpers/litesvm.js'
+import { CONFIG_MIGRATION_QUOTE_THRESHOLD_OFFSET, LITESVM_SKIP_REASON, isCurveComplete, litesvmSuiteTitle, readU64, setupMarket } from './helpers/litesvm.js'
 
 const PACKET_DATA_SIZE = 1232
 const BASE_DECIMALS = 6
@@ -43,9 +41,8 @@ const FEE_BPS = 100
 const CREATOR_LAMPORTS = 10_000_000_000n // 10 SOL
 const INITIAL_BUY = 2_000_000n // 0.002 SOL: far below the Anti-Whale cap (20% of swap_base_amount)
 
-const SCENARIO_PATH = fileURLToPath(new URL('../../litesvm-diff/out/scenario_tiny.json', import.meta.url))
-const SCENARIO_THRESHOLD = BigInt((JSON.parse(readFileSync(SCENARIO_PATH, 'utf8')) as [{ migration_quote_threshold: string }])[0]
-  .migration_quote_threshold)
+/** Fixed launch input keeps the offline tests independent of sibling fixtures. */
+const SCENARIO_THRESHOLD = 303_124_998n
 
 const localnet = getClusterConfig('localnet')
 const mainnet = getClusterConfig('mainnet-beta')
@@ -101,9 +98,9 @@ const wireSize = (tx: Transaction): number => tx.serialize({ requireAllSignature
 
 describe('buildZeroPvpConfigParameters', () => {
   it('builds a static quote-collected fee: cliff = feeBps * 1e5, no scheduler periods, no dynamic fee', () => {
-    const params = buildZeroPvpConfigParameters(presetOf({ feeBps: 250 }))
+    const params = buildZeroPvpConfigParameters(presetOf({ feeBps: 75 }))
 
-    expect(params.poolFees.baseFee.cliffFeeNumerator.toString()).toBe(bn(250 * 100_000))
+    expect(params.poolFees.baseFee.cliffFeeNumerator.toString()).toBe(bn(75 * 100_000))
     expect(params.poolFees.baseFee.firstFactor).toBe(0)
     expect(params.poolFees.baseFee.secondFactor.toString()).toBe('0')
     expect(params.poolFees.baseFee.thirdFactor.toString()).toBe('0')
@@ -176,8 +173,15 @@ describe('buildZeroPvpConfigParameters', () => {
     expect(() => buildZeroPvpConfigParameters(presetOf({ quote: TSLAX, migrationQuoteThreshold: 500_000_001n }))).toThrow(/cap/)
   })
 
+  it.each([MIN_FEE_BPS, 100])('accepts the launch fee boundary of %i bps', (feeBps) => {
+    const params = buildZeroPvpConfigParameters(presetOf({ feeBps }))
+
+    expect(params.poolFees.baseFee.cliffFeeNumerator.toString()).toBe(bn(feeBps * 100_000))
+  })
+
   it.each([
     ['feeBps below the DBC minimum', { feeBps: 24 }, /feeBps/],
+    ['feeBps above the router maximum', { feeBps: 101 }, /feeBps must be an integer between 25 and 100/],
     ['feeBps above the DBC maximum', { feeBps: 9_901 }, /feeBps/],
     ['fractional feeBps', { feeBps: 100.5 }, /feeBps/],
     ['zero threshold', { migrationQuoteThreshold: 0n }, /migrationQuoteThreshold/],
@@ -280,6 +284,11 @@ describe('buildLaunchPlan (offline)', () => {
       .rejects.toThrow(/exceeds the SOL cap/)
   })
 
+  it('rejects a fee above the router cap before building a launch plan', async () => {
+    await expect(buildLaunchPlan(launchParams({ preset: presetOf({ feeBps: 101 }) })).then(() => undefined))
+      .rejects.toThrow(/feeBps must be an integer between 25 and 100/)
+  })
+
   it.each([
     ['an empty name', { name: '' }, /name/],
     ['a name above 32 bytes', { name: 'N'.repeat(33) }, /name/],
@@ -306,7 +315,7 @@ describe('buildLaunchPlan (offline)', () => {
   })
 })
 
-describe('buildLaunchPlan on LiteSVM (wSOL, capped router)', () => {
+describe.skipIf(LITESVM_SKIP_REASON !== null)(litesvmSuiteTitle('buildLaunchPlan on LiteSVM (wSOL, capped router)'), () => {
   let svm: LiteSVM
 
   beforeAll(async () => {

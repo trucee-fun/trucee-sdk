@@ -36,7 +36,7 @@ import {
   setAutoExitInstructions,
 } from '../src/index.js'
 import type { AutoExitEvent, AutoExitSetEvent, MarketAccounts, PositionAccount, RouterEvent } from '../src/index.js'
-import { readU64, setupMarket, tokenAmount, CONFIG_MIGRATION_QUOTE_THRESHOLD_OFFSET, type MarketSetup } from './helpers/litesvm.js'
+import { readU64, setupMarket, tokenAmount, CONFIG_MIGRATION_QUOTE_THRESHOLD_OFFSET, LITESVM_SKIP_REASON, litesvmSuiteTitle, type MarketSetup } from './helpers/litesvm.js'
 
 const cluster = getClusterConfig('localnet')
 const U64_MAX = 2n ** 64n - 1n
@@ -237,7 +237,7 @@ const refundForBasis = (basis: bigint, feeNumerator: bigint): bigint => {
   return refund > 0n ? refund : 0n
 }
 
-describe('Auto-Exit on LiteSVM (wSOL quote)', () => {
+describe.skipIf(LITESVM_SKIP_REASON !== null)(litesvmSuiteTitle('Auto-Exit on LiteSVM (wSOL quote)'), () => {
   let setup: MarketSetup
   let cranker: Keypair
   let deadline: bigint

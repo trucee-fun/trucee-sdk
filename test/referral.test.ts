@@ -24,7 +24,7 @@ import {
   parseRouterEvents,
 } from '../src/index.js'
 import type { BuyEvent, MarketAccounts, PositionAccount } from '../src/index.js'
-import { CONFIG_MIGRATION_QUOTE_THRESHOLD_OFFSET, readU64, setupMarket, tokenAmount, type MarketSetup } from './helpers/litesvm.js'
+import { CONFIG_MIGRATION_QUOTE_THRESHOLD_OFFSET, LITESVM_SKIP_REASON, litesvmSuiteTitle, readU64, setupMarket, tokenAmount, type MarketSetup } from './helpers/litesvm.js'
 
 const cluster = getClusterConfig('localnet')
 /** Router buy accounts without a referrer: 6 router + 12 DBC swap accounts, then 3 hook remaining accounts. */
@@ -126,7 +126,7 @@ describe('buyInstructions with a referrer (instruction shape)', () => {
 const BUY_DIVISOR = 60n
 const SETUP_TIMEOUT_MS = 180_000
 
-describe('referral buys on LiteSVM (wSOL quote, capped router)', () => {
+describe.skipIf(LITESVM_SKIP_REASON !== null)(litesvmSuiteTitle('referral buys on LiteSVM (wSOL quote, capped router)'), () => {
   /** Market A: the buyer names a referrer. Market B: an identical fresh market, the same buy without one. */
   let a: MarketSetup
   let b: MarketSetup

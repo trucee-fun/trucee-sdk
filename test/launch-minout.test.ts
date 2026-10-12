@@ -3,8 +3,6 @@
  * and resumed plans. A resumed launch's market already exists, so its buy runs at the current price; the bound lets
  * the creator's confirmed quote hold on chain (DBC ExceededSlippage) instead of only in the UI.
  */
-import { readFileSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
 import { Buffer } from 'buffer'
 import {
   Connection,
@@ -31,7 +29,7 @@ import {
   quoteBuy,
 } from '../src/index.js'
 import type { BuyQuote, LaunchParams, LaunchPlan, MarketAccount, PresetOptions, QuoteMintInfo } from '../src/index.js'
-import { setupMarket } from './helpers/litesvm.js'
+import { LITESVM_SKIP_REASON, litesvmSuiteTitle, setupMarket } from './helpers/litesvm.js'
 
 const FEE_BPS = 100
 const CREATOR_LAMPORTS = 10_000_000_000n // 10 SOL
@@ -43,9 +41,8 @@ const BUY_DATA_LENGTH = 24
 const AMOUNT_IN_OFFSET = 8
 const MIN_OUT_OFFSET = 16
 
-const SCENARIO_PATH = fileURLToPath(new URL('../../litesvm-diff/out/scenario_tiny.json', import.meta.url))
-const SCENARIO_THRESHOLD = BigInt((JSON.parse(readFileSync(SCENARIO_PATH, 'utf8')) as [{ migration_quote_threshold: string }])[0]
-  .migration_quote_threshold)
+/** Fixed launch input keeps the offline tests independent of sibling fixtures. */
+const SCENARIO_THRESHOLD = 303_124_998n
 
 const localnet = getClusterConfig('localnet')
 const SOL: QuoteMintInfo = (() => {
@@ -171,7 +168,7 @@ describe('buildLaunchPlan initialBuyMinOut (offline)', () => {
   })
 })
 
-describe('buildLaunchPlan initialBuyMinOut on LiteSVM (wSOL, capped router)', () => {
+describe.skipIf(LITESVM_SKIP_REASON !== null)(litesvmSuiteTitle('buildLaunchPlan initialBuyMinOut on LiteSVM (wSOL, capped router)'), () => {
   let svm: LiteSVM
 
   beforeAll(async () => {

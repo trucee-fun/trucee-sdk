@@ -1,6 +1,7 @@
 {
   "name": "@trucee/sdk",
   "version": "0.1.0",
+  "license": "MIT",
   "private": true,
   "description": "Trucee (Zero-PvP curve) client SDK: router accounts, events, instructions, launch preset and quotes",
   "type": "module",

@@ -273,9 +273,9 @@ export function buyInstructions(p: BuyParams): TransactionInstruction[] {
 }
 
 /**
- * Exit at cost through the router: idempotently creates the user's quote ATA (the refund lands there, and an earlier
- * unwrap may have closed it), calls the router `sell`, then closes that ATA to unwrap the refund to SOL when
- * `unwrapSol` is set and the quote is native.
+ * Exit at cost before graduation, with the 2-lamport haircut: idempotently creates the user's quote ATA
+ * (the refund lands there, and an earlier unwrap may have closed it), calls the router `sell`, then closes that ATA
+ * to unwrap the refund to SOL when `unwrapSol` is set and the quote is native.
  */
 export function sellInstructions(p: SellParams): TransactionInstruction[] {
   const context = requireSwapContext(p, 'sellInstructions')

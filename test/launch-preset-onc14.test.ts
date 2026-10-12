@@ -2,12 +2,10 @@
  * SDK-23: every SDK-built launch passes the hardened init_market (ONC-14). DBC's buildCurve always returns a fixed
  * supply (tokenSupply { pre, post }), which DBC stores as fixed_token_supply_flag = 1 and the router rejects with
  * PresetNotAllowed (6023). The SDK preset is dynamic supply instead (tokenSupply null; DBC burns the leftover at
- * migration), as docs/trucee-plan.md locks it. Runs on LiteSVM with DBC, zpvp_hook and the ONC-14 capped router
+ * migration). Runs on LiteSVM with DBC, zpvp_hook and the capped router
  * from zpvp/target/deploy (wSOL quote, threshold from litesvm-diff/out/scenario_tiny.json). The SDK also fails closed:
  * a buildCurve result that breaks any preset rule (mutated through a pass-through mock) never becomes a config.
  */
-import { readFileSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
 import { Buffer } from 'buffer'
 import BN from 'bn.js'
 import {
@@ -30,7 +28,7 @@ import { FailedTransactionMetadata, type LiteSVM } from 'litesvm'
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { buildLaunchPlan, buildZeroPvpConfigParameters, decodeMarket, getClusterConfig } from '../src/index.js'
 import type { LaunchParams, LaunchPlan, PresetOptions, QuoteMintInfo } from '../src/index.js'
-import { CONFIG_SWAP_BASE_AMOUNT_OFFSET, readU64, setupMarket } from './helpers/litesvm.js'
+import { CONFIG_SWAP_BASE_AMOUNT_OFFSET, LITESVM_SKIP_REASON, litesvmSuiteTitle, readU64, setupMarket } from './helpers/litesvm.js'
 
 type CurveMutation = (params: ConfigParameters) => ConfigParameters
 
@@ -61,9 +59,8 @@ const MINT_SUPPLY_OFFSET = 36
 const OPEN_MARKET_TX = 2
 const INIT_MARKET_IX = 1
 
-const SCENARIO_PATH = fileURLToPath(new URL('../../litesvm-diff/out/scenario_tiny.json', import.meta.url))
-const SCENARIO_THRESHOLD = BigInt((JSON.parse(readFileSync(SCENARIO_PATH, 'utf8')) as [{ migration_quote_threshold: string }])[0]
-  .migration_quote_threshold)
+/** Fixed launch input keeps the offline tests independent of sibling fixtures. */
+const SCENARIO_THRESHOLD = 303_124_998n
 
 const localnet = getClusterConfig('localnet')
 const SOL: QuoteMintInfo = (() => {
@@ -160,7 +157,7 @@ class SvmBlockhashConnection extends Connection {
   }
 }
 
-describe('SDK launch preset against the ONC-14 router (LiteSVM, wSOL, capped router)', () => {
+describe.skipIf(LITESVM_SKIP_REASON !== null)(litesvmSuiteTitle('SDK launch preset against the router (LiteSVM, wSOL, capped router)'), () => {
   let svm: LiteSVM
 
   beforeAll(async () => {

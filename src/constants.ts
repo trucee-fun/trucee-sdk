@@ -11,6 +11,8 @@ export const DBC_PROGRAM_ID = new PublicKey('dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D
 
 /** DBC fee numerators are parts per FEE_DENOMINATOR. */
 export const FEE_DENOMINATOR = 1_000_000_000n
+/** Maximum static fee accepted by the router when opening a market: 1%. */
+export const ROUTER_MAX_FEE_BPS = 100
 /** Basis withheld per buy to absorb DBC's pool-favoured rounding. */
 export const DUST_PER_BUY = 16n
 /** Withheld per exit so many tiny exits cannot drain the buffer through rounding dust. */
@@ -18,11 +20,6 @@ export const HAIRCUT_PER_EXIT = 2n
 
 /** Market: discriminator 8 | 7 pubkeys | fee u64 | bump u8 | total_basis u64 | finalized u8 | 3 x u64. */
 export const MARKET_ACCOUNT_SIZE = 274
-/**
- * Router v6 Market (ONC-15): the v5 layout plus basis_bought_total u64 | retention u8 | fees_settled u8 |
- * fees_claimed u64 | creator_paid u64, appended at offsets 274/282/283/284/292.
- */
-export const MARKET_ACCOUNT_SIZE_V6 = 300
 /** Position without auto-exit: discriminator 8 | owner | market | tokens u64 | basis u64 | bump u8. */
 export const POSITION_ACCOUNT_SIZE_V1 = 89
 /** Position with the trailing auto_exit_deadline i64. */

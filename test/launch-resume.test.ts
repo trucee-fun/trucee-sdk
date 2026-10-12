@@ -4,8 +4,6 @@
  * completes even after a third party sends the permissionless hook init and init_market between the creator's
  * transactions. Existing accounts that do not match the caller's launch are an error, not a silent skip.
  */
-import { readFileSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
 import { Buffer } from 'buffer'
 import {
   Connection,
@@ -32,14 +30,13 @@ import {
   initMarketInstruction,
 } from '../src/index.js'
 import type { LaunchParams, LaunchPlan, PresetOptions, QuoteMintInfo } from '../src/index.js'
-import { setupMarket } from './helpers/litesvm.js'
+import { LITESVM_SKIP_REASON, litesvmSuiteTitle, setupMarket } from './helpers/litesvm.js'
 
 const FEE_BPS = 100
 const CREATOR_LAMPORTS = 10_000_000_000n // 10 SOL
 const INITIAL_BUY = 2_000_000n // 0.002 SOL, far below the Anti-Whale cap
-const SCENARIO_PATH = fileURLToPath(new URL('../../litesvm-diff/out/scenario_tiny.json', import.meta.url))
-const SCENARIO_THRESHOLD = BigInt((JSON.parse(readFileSync(SCENARIO_PATH, 'utf8')) as [{ migration_quote_threshold: string }])[0]
-  .migration_quote_threshold)
+/** Fixed launch input keeps the offline tests independent of sibling fixtures. */
+const SCENARIO_THRESHOLD = 303_124_998n
 
 const localnet = getClusterConfig('localnet')
 const SOL: QuoteMintInfo = (() => {
@@ -196,7 +193,7 @@ describe('buildLaunchPlan resume (offline)', () => {
   })
 })
 
-describe('buildLaunchPlan resume on LiteSVM (wSOL, capped router)', () => {
+describe.skipIf(LITESVM_SKIP_REASON !== null)(litesvmSuiteTitle('buildLaunchPlan resume on LiteSVM (wSOL, capped router)'), () => {
   let svm: LiteSVM
 
   beforeAll(async () => {
@@ -346,8 +343,8 @@ describe('buildLaunchPlan resume on LiteSVM (wSOL, capped router)', () => {
     const first = await buildLaunchPlan(params)
     expect(sendPlanTx(first, 0, creator)).toBeNull()
 
-    await expect(buildLaunchPlan({ ...params, ...resumeKeys(first), preset: { ...params.preset, feeBps: FEE_BPS * 2 } }))
-      .rejects.toThrow(/existing config \w+ has base fee numerator 10000000, expected 20000000/)
+    await expect(buildLaunchPlan({ ...params, ...resumeKeys(first), preset: { ...params.preset, feeBps: FEE_BPS / 2 } }))
+      .rejects.toThrow(/existing config \w+ has base fee numerator 10000000, expected 5000000/)
   })
 
   it('throws when an existing pool belongs to another config', async () => {

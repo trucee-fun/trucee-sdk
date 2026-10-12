@@ -1,5 +1,6 @@
 /**
- * Buy and exit quotes and the "Your floor" value. Exit math mirrors zpvp/programs/zpvp_router/src/math.rs exactly;
+ * Buy and exit quotes before graduation and the floor value until graduation, including the 2-lamport haircut.
+ * Exit math mirrors zpvp/programs/zpvp_router/src/math.rs exactly;
  * the buy quote runs the DBC SDK's curve math over the live pool and config, the way the router's buy swaps.
  */
 import { Buffer } from 'buffer'
@@ -69,15 +70,15 @@ export function basisForExit(positionTokens: bigint, positionBasis: bigint, toke
   return (positionBasis * tokens) / positionTokens
 }
 
-/** Guaranteed pre-graduation exit value of the whole position ("Your floor"). */
+/** Floor until graduation: the router pays max(0, basis - fee at cost - 2 lamports) on an exit before graduation. */
 export function floorValue(position: PositionAccount, market: MarketAccount): bigint {
   assertSameMarket(position, market, 'floorValue')
   return refundFor(position.basis, market.feeNumerator)
 }
 
 /**
- * Exit at cost of `tokens` out of `position`: the basis released, the fee charged as if selling at cost, and the
- * refund the router pays (basis part - fee at cost - haircut, floored at zero).
+ * Exit at cost before graduation of `tokens` out of `position`: the basis released, the fee charged as if selling
+ * at cost, and the refund the router pays (basis part - fee at cost - 2 lamports, floored at zero).
  *
  * @throws RangeError when `tokens` is 0 or above the position (the router's InvalidExitAmount).
  */

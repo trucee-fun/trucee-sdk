@@ -28,7 +28,9 @@ import type { BuyEvent, MarketAccount, PositionAccount, RouterEvent, SellEvent }
 import {
   CONFIG_MIGRATION_QUOTE_THRESHOLD_OFFSET,
   CONFIG_SWAP_BASE_AMOUNT_OFFSET,
+  LITESVM_SKIP_REASON,
   isCurveComplete,
+  litesvmSuiteTitle,
   readU64,
   setupMarket,
   tokenAmount,
@@ -216,7 +218,7 @@ const eventOf = <N extends RouterEvent['name']>(logs: readonly string[], name: N
   return event as Extract<RouterEvent, { name: N }>
 }
 
-describe('quotes on LiteSVM (wSOL quote, capped router)', () => {
+describe.skipIf(LITESVM_SKIP_REASON !== null)(litesvmSuiteTitle('quotes on LiteSVM (wSOL quote, capped router)'), () => {
   let setup: MarketSetup
   let connection: Connection
   let threshold: bigint

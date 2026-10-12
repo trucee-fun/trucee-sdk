@@ -32,7 +32,7 @@ import {
   sellInstructions,
 } from '../src/index.js'
 import type { MarketAccounts, PositionAccount, SellEvent } from '../src/index.js'
-import { CONFIG_MIGRATION_QUOTE_THRESHOLD_OFFSET, readU64, setupMarket, tokenAmount, type MarketSetup } from './helpers/litesvm.js'
+import { CONFIG_MIGRATION_QUOTE_THRESHOLD_OFFSET, LITESVM_SKIP_REASON, litesvmSuiteTitle, readU64, setupMarket, tokenAmount, type MarketSetup } from './helpers/litesvm.js'
 
 const cluster = getClusterConfig('localnet')
 
@@ -111,7 +111,7 @@ const PRICE_RAISE_BUY_DIVISOR = 30n
 const LITESVM_SIGNATURE_FEE = 5_000n
 const SETUP_TIMEOUT_MS = 120_000
 
-describe('sell after the quote ATA is gone (LiteSVM, wSOL quote)', () => {
+describe.skipIf(LITESVM_SKIP_REASON !== null)(litesvmSuiteTitle('sell after the quote ATA is gone (LiteSVM, wSOL quote)'), () => {
   let setup: MarketSetup
   let threshold: bigint
 

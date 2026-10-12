@@ -1,10 +1,9 @@
 /**
  * Zero-PvP launch: the DBC config preset and the transactions that create config, pool and router market.
  *
- * Preset rules (docs/trucee-plan.md §Preset rules): no creator token allocation (no locked vesting); a static,
- * quote-collected fee (the router's read_config rejects fee schedulers, rate limiters and dynamic fees); a Token-2022
- * base whose transfer hook is zpvp_hook; DAMM v2 migration with no migration fee; dynamic supply and fully, permanently
- * locked LP with no LP vesting (the router's init_market rejects anything else with PresetNotAllowed). Retention Fee /
+ * The preset uses a Token-2022 base with the Trucee hook, a static quote-collected fee capped at 1%, and DAMM v2 migration.
+ * Supply is dynamic, creator allocation and migration fees are zero, and all LP is permanently locked with no vesting.
+ * The router rejects fee schedulers, rate limiters, dynamic fees and any config that breaks these rules. Retention Fee /
  * Leftover are not built, so the fee claimer and the leftover receiver are plain wallets chosen by the caller, never a
  * Trucee PDA. Under dynamic supply DBC burns the leftover at migration, so the leftover receiver receives nothing; DBC
  * still requires the account, so the parameter stays.
@@ -30,7 +29,6 @@ import {
   BaseFeeMode,
   CollectFeeMode,
   DYNAMIC_BONDING_CURVE_PROGRAM_ID,
-  MAX_FEE_BPS,
   MIN_FEE_BPS,
   MigrationFeeOption,
   MigrationOption,
@@ -53,6 +51,7 @@ import {
   type TransferHookPool,
 } from '@meteora-ag/dynamic-bonding-curve-sdk'
 import { decodeMarket } from './accounts.js'
+import { ROUTER_MAX_FEE_BPS } from './constants.js'
 import { buyInstructions, initExtraAccountMetasInstruction, initMarketInstruction } from './instructions.js'
 import { findBufferPda, findExtraAccountMetasPda, findMarketPda, findPositionPda } from './pda.js'
 import type { ClusterConfig, LaunchParams, LaunchPlan, MarketAccounts, PresetOptions, QuoteMintInfo } from './types.js'
@@ -202,7 +201,7 @@ function requirePreset(opts: unknown): Preset {
   return Object.freeze({
     quote,
     migrationQuoteThreshold,
-    feeBps: requireInteger(o.feeBps, 'feeBps', MIN_FEE_BPS, MAX_FEE_BPS),
+    feeBps: requireInteger(o.feeBps, 'feeBps', MIN_FEE_BPS, ROUTER_MAX_FEE_BPS),
     feeClaimer: requireWallet(o.feeClaimer, 'feeClaimer'),
     leftoverReceiver: requireWallet(o.leftoverReceiver, 'leftoverReceiver'),
     totalTokenSupply: requireTotalTokenSupply(o.totalTokenSupply),
@@ -270,8 +269,8 @@ const lpVestingFields = (info: LiquidityVestingInfo | undefined): readonly Numer
 
 /**
  * [rule, holds] for every rule of the preset: the ones the router's init_market enforces with PresetNotAllowed (6023)
- * on the config bytes (ONC-14: supply, locked vesting, LP split; ONC-08/ONC-20: migration option and fees, immutable
- * token authority) and its read_config static-fee rule.
+ * on the config bytes (supply, locked vesting, LP split, migration option and fees, immutable token authority)
+ * and its read_config static-fee rule.
  */
 function presetRules(p: ConfigParameters): readonly (readonly [rule: string, holds: boolean])[] {
   const vesting = p.lockedVesting

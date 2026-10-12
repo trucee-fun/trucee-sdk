@@ -33,6 +33,13 @@ const PROGRAM_PATHS = Object.freeze({
 })
 const SCENARIO_PATH = repoPath('litesvm-diff/out/scenario_tiny.json')
 
+const MISSING_FILES = Object.freeze([...Object.values(PROGRAM_PATHS), SCENARIO_PATH].filter((path) => !existsSync(path)))
+/** Missing sibling fixtures or program binaries skip only the suites that execute on LiteSVM. */
+export const LITESVM_SKIP_REASON = MISSING_FILES.length === 0 ? null : `missing workspace files: ${MISSING_FILES.join(', ')}`
+
+export const litesvmSuiteTitle = (title: string): string =>
+  LITESVM_SKIP_REASON === null ? title : `${title} (skipped: ${LITESVM_SKIP_REASON})`
+
 /** DBC pool: MigrationProgress byte (0 = PreBondingCurve). */
 export const POOL_MIGRATION_PROGRESS_OFFSET = 308
 /** DBC ConfigWithTransferHook: swap_base_amount and migration_quote_threshold (u64). */
